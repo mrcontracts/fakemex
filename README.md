@@ -45,6 +45,8 @@ Start both services from one command (recommended):
 `launch.sh` checks required commands and required config keys, builds the backend to
 `.run/fakemex`, installs frontend dependencies if needed, checks default ports, and
 launches both services with strict cleanup on exit.
+Running it again safely restarts this project's existing backend and frontend;
+it refuses to stop unrelated processes that happen to occupy either port.
 
 Use a different workspace-local config file when needed:
 

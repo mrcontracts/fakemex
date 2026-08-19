@@ -22,6 +22,8 @@ REQUIRED_KEYS=(
 
 BACKEND_LOG="$RUN_DIR/backend.log"
 FRONTEND_LOG="$RUN_DIR/frontend.log"
+BACKEND_PID_FILE="$RUN_DIR/backend.pid"
+FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
 BACKEND_PID=""
 FRONTEND_PID=""
 CLEANUP_DONE=0
@@ -75,6 +77,63 @@ is_port_open() {
 is_running() {
   local pid=$1
   kill -0 "$pid" >/dev/null 2>&1
+}
+
+listener_pid() {
+  local port=$1
+  local line
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ pid=([0-9]+) ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done < <(ss -H -ltnp "sport = :${port}" 2>/dev/null)
+  return 1
+}
+
+process_matches_service() {
+  local pid=$1
+  local service=$2
+  local cwd
+  local executable
+  local command_line
+  local command_path
+
+  if ! is_running "$pid" || [[ ! -r "/proc/$pid/cmdline" ]]; then
+    return 1
+  fi
+  cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+  executable="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+  command_line="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+  command_path="${command_line%% *}"
+
+  case "$service" in
+    backend)
+      [[ "$cwd" == "$BACKEND_DIR" ]] || return 1
+      [[ "$executable" == "$RUN_BIN" || "$executable" == "$RUN_BIN (deleted)" || "$command_path" == "$RUN_BIN" || "$command_path" == "../.run/fakemex" ]]
+      ;;
+    frontend)
+      [[ "$cwd" == "$FRONTEND_DIR" ]] || return 1
+      [[ "$command_line" == *"ng serve"* && "$command_line" == *"--port $FRONTEND_PORT"* ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+remove_pid_file_if_owned() {
+  local file=$1
+  local pid=$2
+  local recorded=""
+
+  if [[ -f "$file" ]]; then
+    IFS= read -r recorded <"$file" || true
+    if [[ "$recorded" == "$pid" ]]; then
+      rm -f -- "$file"
+    fi
+  fi
 }
 
 wait_for_http() {
@@ -136,7 +195,57 @@ cleanup() {
   set +e
   terminate_pid "$BACKEND_PID" "backend"
   terminate_pid "$FRONTEND_PID" "frontend"
+  remove_pid_file_if_owned "$BACKEND_PID_FILE" "$BACKEND_PID"
+  remove_pid_file_if_owned "$FRONTEND_PID_FILE" "$FRONTEND_PID"
   set -e
+}
+
+stop_recorded_service() {
+  local file=$1
+  local service=$2
+  local pid=""
+
+  if [[ ! -f "$file" ]]; then
+    return 0
+  fi
+  IFS= read -r pid <"$file" || true
+  if [[ ! "$pid" =~ ^[0-9]+$ ]] || ! is_running "$pid"; then
+    rm -f -- "$file"
+    return 0
+  fi
+  if ! process_matches_service "$pid" "$service"; then
+    echo "Ignoring stale ${service} PID file; process ${pid} is not owned by this project."
+    rm -f -- "$file"
+    return 0
+  fi
+
+  echo "Stopping existing FakeMex ${service} process (${pid})..."
+  terminate_pid "$pid" "$service"
+  rm -f -- "$file"
+}
+
+stop_service_on_port() {
+  local service=$1
+  local host=$2
+  local port=$3
+  local pid=""
+
+  if ! is_port_open "$host" "$port"; then
+    return 0
+  fi
+  pid="$(listener_pid "$port" || true)"
+  if [[ -z "$pid" ]]; then
+    fail "${service} port ${port} is in use, but its process could not be identified"
+  fi
+  if ! process_matches_service "$pid" "$service"; then
+    fail "${service} port ${port} is used by an unrelated process (${pid}); refusing to stop it"
+  fi
+
+  echo "Stopping existing FakeMex ${service} process (${pid})..."
+  terminate_pid "$pid" "$service"
+  if is_port_open "$host" "$port"; then
+    fail "${service} port ${port} is still in use after stopping process ${pid}"
+  fi
 }
 
 show_status() {
@@ -169,6 +278,7 @@ trap 'cleanup; exit 130' INT TERM
 require_cmd go
 require_cmd npm
 require_cmd curl
+require_cmd ss
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
   fail "missing config file: $CONFIG_PATH"
@@ -224,14 +334,6 @@ if [[ ! "$FRONTEND_PORT" =~ ^[0-9]+$ ]] || ((FRONTEND_PORT < 1 || FRONTEND_PORT 
   fail "invalid frontend port: ${FRONTEND_PORT}"
 fi
 
-if is_port_open "$BACKEND_HOST" "$BACKEND_PORT"; then
-  fail "backend port ${BACKEND_PORT} is already in use. Free it before launching (or run with no override support for backend host/port)."
-fi
-
-if is_port_open "$FRONTEND_HOST" "$FRONTEND_PORT"; then
-  fail "frontend port ${FRONTEND_PORT} is already in use. Free it before launching."
-fi
-
 mkdir -p "$RUN_DIR"
 
 if [[ ! -x "$FRONTEND_DIR/node_modules/.bin/ng" ]]; then
@@ -243,17 +345,24 @@ if [[ ! -x "$RUN_BIN" ]]; then
   fail "backend build failed: missing binary $RUN_BIN"
 fi
 
+stop_recorded_service "$BACKEND_PID_FILE" "backend"
+stop_recorded_service "$FRONTEND_PID_FILE" "frontend"
+stop_service_on_port "backend" "$BACKEND_HOST" "$BACKEND_PORT"
+stop_service_on_port "frontend" "$FRONTEND_HOST" "$FRONTEND_PORT"
+
 (
   cd "$BACKEND_DIR"
   exec ../.run/fakemex -config "$CONFIG_PATH"
 ) >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
+printf '%s\n' "$BACKEND_PID" >"$BACKEND_PID_FILE"
 
 (
   cd "$FRONTEND_DIR"
   exec ./node_modules/.bin/ng serve --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" --proxy-config proxy.conf.json
 ) >"$FRONTEND_LOG" 2>&1 &
 FRONTEND_PID=$!
+printf '%s\n' "$FRONTEND_PID" >"$FRONTEND_PID_FILE"
 
 FRONTEND_URL="http://${FRONTEND_HOST}:${FRONTEND_PORT}/"
 wait_for_http "http://${BACKEND_ADDR}/api/v1/health" "backend health"
