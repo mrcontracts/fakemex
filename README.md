@@ -18,6 +18,44 @@ account, and order data use Hyperliquid's official API.
 
 - Node.js 26 and npm 12
 - Go 1.26
+- Bash, `curl`, CA certificates, and `ss` from `iproute2`
+- A C build toolchain (`build-essential` on Ubuntu) for the Go dependencies
+
+## Install on Ubuntu or WSL 2
+
+Install the required system packages:
+
+```sh
+sudo apt update
+sudo apt install -y build-essential ca-certificates curl git iproute2 make
+```
+
+Ubuntu's package repositories may contain older Node.js or Go releases. Install
+the versions listed above using their official distributions or your preferred
+version manager, then verify them before continuing:
+
+```sh
+node --version
+npm --version
+go version
+```
+
+Install the frontend and backend dependencies:
+
+```sh
+make install
+```
+
+Create the local configuration only if it does not already exist, then restrict
+its permissions before adding account or API-wallet values:
+
+```sh
+test -f config/local.env || cp config/local.env.example config/local.env
+chmod 600 config/local.env
+```
+
+Edit `config/local.env` as described below, then start FakeMex with
+`./launch.sh`. The launcher requires ports `8080` and `4200` to be available.
 
 ## Local configuration
 
@@ -98,6 +136,17 @@ distribution. The wrapper stays attached to `launch.sh`, so `Ctrl+C` performs
 the launcher's normal cleanup and its exit code is returned to PowerShell.
 
 ## Verify
+
+The first end-to-end test run also needs Playwright's Chromium browser and its
+Linux system dependencies:
+
+```sh
+cd frontend
+npx playwright install --with-deps chromium
+cd ..
+```
+
+Then run the complete checks and production builds:
 
 ```sh
 make test
