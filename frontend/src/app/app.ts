@@ -589,8 +589,11 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
         margin: this.densityMargin(),
         sizeToContent: false,
         alwaysShowResizeHandle: true,
+        draggable: {
+          handle: '.fm-panel__header',
+        },
         resizable: {
-          handles: 's,e,se',
+          handles: 'se',
           autoHide: false,
         },
       },

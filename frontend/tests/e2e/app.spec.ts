@@ -456,20 +456,64 @@ test('rectangular elements use unified radius while circular controls stay circu
   }
 });
 
-test('resizes panel vertically with south resize handle', async ({ page }) => {
+test('keeps chart axes interactive and resizes the tile only from its corner grip', async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
 
   const panel = page.locator('.grid-stack-item[gs-id="chart"]').first();
   await expect(panel).toBeVisible();
+  await expect(panel.locator('.ui-resizable-e, .ui-resizable-s')).toHaveCount(0);
 
-  const resizeHandle = panel.locator('.ui-resizable-s, .ui-resizable-se').first();
+  const chartCanvases = panel.locator('.chart-root canvas');
+  const priceAxis = chartCanvases.nth(2);
+  const timeAxis = chartCanvases.nth(4);
+  await priceAxis.evaluate((element) => element.scrollIntoView({ block: 'center' }));
+
+  const beforeAxisDrag = await panel.boundingBox();
+  const priceAxisBox = await priceAxis.boundingBox();
+  expect(beforeAxisDrag).not.toBeNull();
+  expect(priceAxisBox).not.toBeNull();
+  await page.mouse.move(
+    priceAxisBox!.x + priceAxisBox!.width / 2,
+    priceAxisBox!.y + priceAxisBox!.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    priceAxisBox!.x + priceAxisBox!.width / 2,
+    priceAxisBox!.y + priceAxisBox!.height / 2 + 160,
+    { steps: 10 },
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+
+  const afterPriceAxisDrag = await panel.boundingBox();
+  expect(afterPriceAxisDrag).not.toBeNull();
+  expect(Math.abs(afterPriceAxisDrag!.x - beforeAxisDrag!.x)).toBeLessThan(1);
+  expect(Math.abs(afterPriceAxisDrag!.y - beforeAxisDrag!.y)).toBeLessThan(1);
+
+  const timeAxisBox = await timeAxis.boundingBox();
+  expect(timeAxisBox).not.toBeNull();
+  await page.mouse.move(
+    timeAxisBox!.x + timeAxisBox!.width / 2,
+    timeAxisBox!.y + timeAxisBox!.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    timeAxisBox!.x + timeAxisBox!.width / 2 + 160,
+    timeAxisBox!.y + timeAxisBox!.height / 2,
+    { steps: 10 },
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  const afterTimeAxisDrag = await panel.boundingBox();
+  expect(afterTimeAxisDrag).not.toBeNull();
+  expect(Math.abs(afterTimeAxisDrag!.x - afterPriceAxisDrag!.x)).toBeLessThan(1);
+  expect(Math.abs(afterTimeAxisDrag!.y - afterPriceAxisDrag!.y)).toBeLessThan(1);
+
+  const resizeHandle = panel.locator('.ui-resizable-se');
   await expect(resizeHandle).toBeVisible();
-
-  const before = await panel.boundingBox();
-  const handleStart = await resizeHandle.boundingBox();
-  expect(before).not.toBeNull();
-  expect(handleStart).not.toBeNull();
 
   const dragSouth = async (deltaY: number) => {
     await resizeHandle.evaluate((el) => el.scrollIntoView({ block: 'center', inline: 'center' }));
@@ -484,6 +528,9 @@ test('resizes panel vertically with south resize handle', async ({ page }) => {
     await page.waitForTimeout(120);
   };
 
+  await resizeHandle.evaluate((element) => element.scrollIntoView({ block: 'center' }));
+  const before = await panel.boundingBox();
+  expect(before).not.toBeNull();
   await dragSouth(-180);
 
   const shrunken = await panel.boundingBox();

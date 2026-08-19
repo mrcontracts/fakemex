@@ -189,30 +189,12 @@ a {
   font-size: 0.82rem;
 }
 
-.grid-stack .ui-resizable-s {
-  height: 12px;
-  cursor: ns-resize;
-  touch-action: none;
-  z-index: 90;
-}
-
-.grid-stack .ui-resizable-s::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 4px;
-  width: 24px;
-  height: 3px;
-  transform: translateX(-50%);
-  border-radius: var(--fakemex-radius);
-  background: color-mix(in srgb, var(--fakemex-accent) 72%, transparent 28%);
-}
-
 .grid-stack .ui-resizable-se {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   cursor: nwse-resize;
   touch-action: none;
+  transform: none;
   border-radius: 50%;
   background: color-mix(in srgb, var(--fakemex-accent) 68%, var(--fakemex-panel-bg) 32%);
 }

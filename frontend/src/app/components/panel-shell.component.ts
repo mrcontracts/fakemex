@@ -19,7 +19,11 @@ import { CommonModule } from '@angular/common';
   styles: [
     `
       .fm-panel {
-        background: linear-gradient(160deg, var(--fakemex-panel-header) 0%, var(--fakemex-panel-body) 100%);
+        background: linear-gradient(
+          160deg,
+          var(--fakemex-panel-header) 0%,
+          var(--fakemex-panel-body) 100%
+        );
         border: 1px solid var(--fakemex-border);
         border-radius: var(--fakemex-radius);
         height: 100%;
@@ -39,6 +43,12 @@ import { CommonModule } from '@angular/common';
         gap: 0.75rem;
         align-items: center;
         padding: 0.8rem 0.9rem;
+        cursor: grab;
+        user-select: none;
+      }
+
+      .fm-panel__header:active {
+        cursor: grabbing;
       }
 
       .fm-panel__title {

@@ -339,6 +339,12 @@ export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy
       crosshair: {
         mode: CrosshairMode.Normal,
       },
+      handleScale: {
+        mouseWheel: true,
+        pinch: true,
+        axisPressedMouseMove: { time: true, price: true },
+        axisDoubleClickReset: { time: true, price: true },
+      },
       rightPriceScale: {
         borderColor: theme.chartAxis,
         autoScale: true,
