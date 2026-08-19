@@ -37,6 +37,7 @@ import { Trade } from '../models';
         gap: 0.4rem;
         padding: 0.24rem 0;
         border-bottom: 1px solid var(--fakemex-border);
+        font-weight: 700;
       }
 
       .buy {

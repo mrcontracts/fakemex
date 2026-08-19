@@ -7,6 +7,16 @@
   --mat-snack-bar-button-color: #ffd2d2;
 }
 
+.trade-submitted {
+  --mdc-snackbar-container-color: color-mix(in srgb, var(--fakemex-buy) 35%, var(--fakemex-panel-bg) 65%);
+  --mdc-snackbar-supporting-text-color: var(--fakemex-text);
+  --mat-snack-bar-button-color: var(--fakemex-text);
+}
+
+.trade-submitted .mdc-snackbar__label {
+  font-weight: 700;
+}
+
 :root {
   color-scheme: dark;
   --fakemex-radius: 8px;

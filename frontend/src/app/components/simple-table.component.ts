@@ -1,5 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
+import { sortTableRows, TableSortDirection } from '../table-sort';
 
 export type SimpleTableCellClass = (
   cell: unknown,
@@ -17,8 +18,18 @@ export type SimpleTableCellClass = (
       <table>
         <thead>
           <tr>
-            @for (header of headers; track header) {
-              <th>{{ header }}</th>
+            @for (header of headers; track $index; let columnIndex = $index) {
+              <th [attr.aria-sort]="ariaSort(columnIndex)">
+                <button
+                  type="button"
+                  class="sort-header"
+                  (click)="sortBy(columnIndex)"
+                  [attr.aria-label]="sortLabel(header, columnIndex)"
+                >
+                  <span>{{ header }}</span>
+                  <span class="sort-indicator" aria-hidden="true">{{ sortIndicator(columnIndex) }}</span>
+                </button>
+              </th>
             }
           </tr>
         </thead>
@@ -30,7 +41,7 @@ export type SimpleTableCellClass = (
               </td>
             </tr>
           } @else {
-            @for (row of rows; track $index) {
+            @for (row of sortedRows; track row) {
               <tr>
                 @for (cell of row; track $index; let columnIndex = $index) {
                   <td [ngClass]="resolveCellClass(cell, row, columnIndex)">{{ cell }}</td>
@@ -76,14 +87,51 @@ export type SimpleTableCellClass = (
         text-transform: uppercase;
       }
 
+      .sort-header {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.25rem;
+        width: 100%;
+        padding: 0;
+        border: 0;
+        color: inherit;
+        background: transparent;
+        font: inherit;
+        font-weight: 700;
+        text-align: inherit;
+        text-transform: inherit;
+        cursor: pointer;
+      }
+
+      .sort-header:focus-visible {
+        outline: 2px solid var(--fakemex-accent);
+        outline-offset: 2px;
+      }
+
+      .sort-indicator {
+        display: inline-block;
+        min-width: 0.7rem;
+        color: var(--fakemex-accent);
+      }
+
       th:first-child,
       td:first-child {
         text-align: left;
       }
 
+      th:first-child .sort-header {
+        justify-content: flex-start;
+      }
+
+      tbody td {
+        font-weight: 700;
+      }
+
       .empty {
         text-align: center;
         color: var(--fakemex-muted);
+        font-weight: 400;
       }
 
       td.cell-buy,
@@ -102,6 +150,37 @@ export class SimpleTableComponent {
   @Input() headers: string[] = [];
   @Input() rows: unknown[][] = [];
   @Input() cellClass?: SimpleTableCellClass;
+  sortColumnIndex: number | null = null;
+  sortDirection: TableSortDirection = 'asc';
+
+  get sortedRows(): unknown[][] {
+    if (this.sortColumnIndex === null) return this.rows;
+    return sortTableRows(this.rows, this.sortColumnIndex, this.sortDirection);
+  }
+
+  sortBy(columnIndex: number): void {
+    if (this.sortColumnIndex === columnIndex) {
+      this.sortDirection = this.sortDirection === 'asc' ? 'desc' : 'asc';
+      return;
+    }
+    this.sortColumnIndex = columnIndex;
+    this.sortDirection = 'asc';
+  }
+
+  ariaSort(columnIndex: number): 'ascending' | 'descending' | null {
+    if (this.sortColumnIndex !== columnIndex) return null;
+    return this.sortDirection === 'asc' ? 'ascending' : 'descending';
+  }
+
+  sortIndicator(columnIndex: number): string {
+    if (this.sortColumnIndex !== columnIndex) return '↕';
+    return this.sortDirection === 'asc' ? '↑' : '↓';
+  }
+
+  sortLabel(header: string, columnIndex: number): string {
+    if (this.sortColumnIndex !== columnIndex) return `Sort ${header} ascending`;
+    return `Sort ${header} ${this.sortDirection === 'asc' ? 'descending' : 'ascending'}`;
+  }
 
   resolveCellClass(cell: unknown, row: readonly unknown[], columnIndex: number): string {
     return this.cellClass?.(cell, row, columnIndex) ?? '';

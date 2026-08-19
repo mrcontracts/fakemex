@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -196,15 +197,38 @@ func (c *safeClient) AccountSnapshot(ctx context.Context, address string) (Accou
 	if address == "" {
 		return Account{}, errors.New("address required")
 	}
-	var raw any
+	var clearinghouseRaw any
 	payload := map[string]any{
 		"type": "clearinghouseState",
 		"user": address,
 	}
-	if err := c.postJSON(ctx, "/info", payload, &raw); err != nil {
+	if err := c.postJSON(ctx, "/info", payload, &clearinghouseRaw); err != nil {
 		return Account{}, err
 	}
-	return parseClearinghouseState(raw, address)
+	account, err := parseClearinghouseState(clearinghouseRaw, address)
+	if err != nil {
+		return Account{}, err
+	}
+
+	// Hyperliquid exposes token balances separately from perpetual margin state.
+	// Prefer spot balances when present (including unified-account balances), but
+	// retain compatibility with upstreams that include assets in clearinghouseState.
+	var spotRaw any
+	if err := c.postJSON(ctx, "/info", map[string]any{
+		"type": "spotClearinghouseState",
+		"user": address,
+	}, &spotRaw); err != nil {
+		c.logger.Warn("spot account state unavailable", "error", err)
+	} else if assets := parseAssets(spotRaw); len(assets) > 0 {
+		account.Balances = assets
+		account.Assets = assets
+	}
+
+	if len(account.Assets) == 0 {
+		account.Assets = assetsFromMargin(account.Margin)
+		account.Balances = account.Assets
+	}
+	return account, nil
 }
 
 func (c *safeClient) Orders(ctx context.Context, address, view string) ([]Order, error) {
@@ -1139,31 +1163,32 @@ func parseClearinghouseState(raw any, address string) (Account, error) {
 		return Account{}, err
 	}
 	marginSummary := firstMap(body["marginSummary"], body["crossMarginSummary"], body["marginSummarys"], body["crossMaintenanceMargin"])
+	crossMarginSummary := firstMap(body["crossMarginSummary"], body["marginSummary"])
 	acc := Account{
 		Address: address,
 	}
 	acc.Positions = parsePositions(rawValues(body, "assetPositions"), rawValues(body, "positions"))
 	acc.Balances = parseAssets(rawValues(body, "assets"), rawValues(body, "balances"))
-	if acc.Balances == nil {
-		acc.Balances = []Asset{}
-	}
 	if acc.Positions == nil {
 		acc.Positions = []Position{}
 	}
 	acc.Margin = Margin{
 		CrossBalance: firstNonEmptyString(
 			asString(body["crossBalance"]),
-			asString(marginSummary["crossMargin"], marginSummary["crossBalance"]),
+			asString(crossMarginSummary["crossMargin"], crossMarginSummary["crossBalance"], crossMarginSummary["accountValue"]),
+			asString(marginSummary["accountValue"]),
 			asString(body["margin"], body["walletBalance"]),
 		),
 		AvailableBalance: firstNonEmptyString(
 			asString(body["available"]),
+			asString(body["withdrawable"]),
 			asString(marginSummary["availableBalance"]),
 			asString(body["availableBalance"]),
 		),
 		TotalMarginUsed: firstNonEmptyString(
 			asString(body["totalMargin"]),
 			asString(marginSummary["totalMarginUsed"]),
+			asString(crossMarginSummary["totalMarginUsed"]),
 			asString(marginSummary["crossMaintenanceMargin"]),
 			asString(marginSummary["totalMaintenanceMargin"]),
 		),
@@ -1252,14 +1277,76 @@ func parseAssets(rawValues ...any) []Asset {
 		if !ok {
 			continue
 		}
+		wallet := firstNonEmptyString(
+			asString(entry["wallet"], entry["position"], entry["balance"]),
+			asString(entry["total"]),
+		)
+		used := firstNonEmptyString(
+			asString(entry["crossMarginUsed"], entry["marginUsed"]),
+			asString(entry["hold"]),
+		)
+		available := asString(entry["available"], entry["availableBalance"])
+		if available == "" {
+			available = subtractDecimalStrings(wallet, used)
+		}
 		out = append(out, Asset{
 			Coin:            asString(entry["coin"], entry["symbol"]),
-			Wallet:          asString(entry["wallet"], entry["position"], entry["balance"]),
-			CrossMarginUsed: asString(entry["crossMarginUsed"], entry["marginUsed"]),
-			Available:       asString(entry["available"], entry["availableBalance"]),
+			Wallet:          wallet,
+			CrossMarginUsed: used,
+			Available:       available,
 		})
 	}
 	return nonNil(out)
+}
+
+func assetsFromMargin(margin Margin) []Asset {
+	if margin.CrossBalance == "" && margin.AvailableBalance == "" && margin.TotalMarginUsed == "" {
+		return nil
+	}
+	return []Asset{{
+		Coin:            "USDC",
+		Wallet:          margin.CrossBalance,
+		Available:       margin.AvailableBalance,
+		CrossMarginUsed: margin.TotalMarginUsed,
+	}}
+}
+
+func subtractDecimalStrings(total, used string) string {
+	if total == "" {
+		return ""
+	}
+	if used == "" {
+		return total
+	}
+	totalValue, ok := new(big.Rat).SetString(total)
+	if !ok {
+		return total
+	}
+	usedValue, ok := new(big.Rat).SetString(used)
+	if !ok {
+		return total
+	}
+	difference := new(big.Rat).Sub(totalValue, usedValue)
+	if difference.Sign() < 0 {
+		return "0"
+	}
+	scale := max(decimalPlaces(total), decimalPlaces(used))
+	text := difference.FloatString(scale)
+	if strings.Contains(text, ".") {
+		text = strings.TrimRight(strings.TrimRight(text, "0"), ".")
+	}
+	if text == "" || text == "-0" {
+		return "0"
+	}
+	return text
+}
+
+func decimalPlaces(value string) int {
+	dot := strings.IndexByte(value, '.')
+	if dot < 0 {
+		return 0
+	}
+	return len(value) - dot - 1
 }
 
 func parseFrontendOrders(raw any, view string) []Order {

@@ -333,11 +333,14 @@ func TestSafeClientOrderEndpointsUseExpectedPayloadsAndNormalize(t *testing.T) {
 		case "clearinghouseState":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"marginSummary": map[string]any{
-					"crossBalance":     "50",
-					"availableBalance": "40",
-					"totalMarginUsed":  "10",
-					"marginMode":       "cross",
+					"accountValue":    "50",
+					"totalMarginUsed": "10",
 				},
+				"crossMarginSummary": map[string]any{
+					"accountValue":    "50",
+					"totalMarginUsed": "10",
+				},
+				"withdrawable": "40",
 				"assetPositions": []any{
 					map[string]any{
 						"position": map[string]any{
@@ -353,12 +356,19 @@ func TestSafeClientOrderEndpointsUseExpectedPayloadsAndNormalize(t *testing.T) {
 						},
 					},
 				},
-				"assets": []any{
+			})
+		case "spotClearinghouseState":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"balances": []any{
 					map[string]any{
-						"coin":            "USDC",
-						"wallet":          "1000",
-						"crossMarginUsed": "60",
-						"available":       "940",
+						"coin":  "USDC",
+						"total": "1000.00",
+						"hold":  "60.25",
+					},
+					map[string]any{
+						"coin":  "BTC",
+						"total": "0.5",
+						"hold":  "0.1",
 					},
 				},
 			})
@@ -421,6 +431,15 @@ func TestSafeClientOrderEndpointsUseExpectedPayloadsAndNormalize(t *testing.T) {
 	if account.Positions[0].Symbol != "BTC" || account.Positions[0].Side != "buy" {
 		t.Fatalf("unexpected position: %#v", account.Positions[0])
 	}
+	if len(account.Assets) != 2 {
+		t.Fatalf("expected spot assets, got %#v", account.Assets)
+	}
+	if account.Assets[0].Coin != "USDC" || account.Assets[0].Wallet != "1000.00" || account.Assets[0].Available != "939.75" || account.Assets[0].CrossMarginUsed != "60.25" {
+		t.Fatalf("unexpected USDC asset: %#v", account.Assets[0])
+	}
+	if account.Assets[1].Coin != "BTC" || account.Assets[1].Available != "0.4" {
+		t.Fatalf("unexpected BTC asset: %#v", account.Assets[1])
+	}
 
 	if requests["frontendOpenOrders"]["type"] != "frontendOpenOrders" {
 		t.Fatalf("missing/open-orders request %v", requests["frontendOpenOrders"])
@@ -433,6 +452,45 @@ func TestSafeClientOrderEndpointsUseExpectedPayloadsAndNormalize(t *testing.T) {
 	}
 	if requests["userFunding"]["type"] != "userFunding" {
 		t.Fatalf("missing/funding request %v", requests["userFunding"])
+	}
+	if requests["spotClearinghouseState"]["type"] != "spotClearinghouseState" {
+		t.Fatalf("missing/spot account request %v", requests["spotClearinghouseState"])
+	}
+}
+
+func TestAccountSnapshotFallsBackToPerpMarginAsset(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := decodeBody(t, r)
+		switch body["type"] {
+		case "clearinghouseState":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"marginSummary": map[string]any{
+					"accountValue":    "250.5",
+					"totalMarginUsed": "25.25",
+				},
+				"withdrawable":   "225.25",
+				"assetPositions": []any{},
+			})
+		case "spotClearinghouseState":
+			_ = json.NewEncoder(w).Encode(map[string]any{"balances": []any{}})
+		default:
+			t.Fatalf("unexpected request payload %#v", body)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewSafeClient(srv.URL, "wss://example.invalid/ws", "0xabc", testingLogger())
+	account, err := client.AccountSnapshot(context.Background(), "0xabc")
+	if err != nil {
+		t.Fatalf("account snapshot failed: %v", err)
+	}
+	if len(account.Assets) != 1 {
+		t.Fatalf("expected one fallback asset, got %#v", account.Assets)
+	}
+	asset := account.Assets[0]
+	if asset.Coin != "USDC" || asset.Wallet != "250.5" || asset.Available != "225.25" || asset.CrossMarginUsed != "25.25" {
+		t.Fatalf("unexpected fallback asset: %#v", asset)
 	}
 }
 

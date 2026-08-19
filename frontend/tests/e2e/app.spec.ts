@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { demoSnapshot } from '../../src/app/mock-data';
 
 test('renders the FakeMex terminal shell', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -107,6 +108,80 @@ test('styles position symbols, sides, and PnL by meaning', async ({ page }) => {
   });
   await expect(side).toHaveCSS('color', sideValue === 'buy' ? colors.buy : colors.sell);
   await expect(pnl).toHaveCSS('color', pnlValue > 0 ? colors.buy : colors.sell);
+});
+
+test('sorts table columns from their headers and uses bold data rows', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.route('**/api/v1/bootstrap**', async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(demoSnapshot) });
+  });
+  await page.goto('/');
+
+  const fills = page.locator('.grid-stack-item[gs-id="fills"]');
+  const priceHeader = fills.getByRole('button', { name: 'Sort Px ascending' });
+  await priceHeader.click();
+
+  const prices = fills.locator('tbody tr td:nth-child(4)');
+  await expect(prices.nth(1)).toBeVisible();
+  const ascendingPrices = (await prices.allTextContents()).map((value) => Number(value.replace(/,/g, '')));
+  expect(ascendingPrices.length).toBeGreaterThan(1);
+  expect(ascendingPrices).toEqual([...ascendingPrices].sort((left, right) => left - right));
+  await expect(prices.nth(0)).toHaveCSS('font-weight', '700');
+
+  await fills.getByRole('button', { name: 'Sort Px descending' }).click();
+  await expect.poll(async () =>
+    (await prices.allTextContents()).map((value) => Number(value.replace(/,/g, ''))),
+  ).toEqual([...ascendingPrices].sort((left, right) => right - left));
+
+  const orderBook = page.locator('.grid-stack-item[gs-id="book"]');
+  await orderBook.getByRole('button', { name: 'Sort Size ascending' }).click();
+  const sizes = orderBook.locator('tbody tr td:nth-child(2)');
+  await expect(sizes.nth(1)).toBeVisible();
+  const expectedSizes = (await sizes.allTextContents())
+    .map((value) => Number(value.replace(/,/g, '')))
+    .sort((left, right) => left - right);
+  await expect.poll(async () =>
+    (await sizes.allTextContents()).map((value) => Number(value.replace(/,/g, ''))),
+  ).toEqual(expectedSizes);
+  const ascendingSizes = (await sizes.allTextContents()).map((value) => Number(value.replace(/,/g, '')));
+  expect(ascendingSizes.length).toBeGreaterThan(1);
+  expect(ascendingSizes).toEqual([...ascendingSizes].sort((left, right) => left - right));
+  await expect(sizes.first()).toHaveCSS('font-weight', '700');
+});
+
+test('notifies with actual fill price and realized slippage after submission', async ({ page }) => {
+  await page.route('**/api/v1/trading', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ available: true, enabled: true, network: 'testnet' }),
+    });
+  });
+  await page.route('**/api/v1/orders', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        requestId: 'e2e-fill',
+        status: 'ok',
+        orderId: '42',
+        filled: '0.01',
+        averagePrice: '50125',
+      }),
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.getByLabel('Disable trading')).toBeVisible();
+  await page.getByLabel('Size (BTC)').fill('0.01');
+  await page.getByLabel('Limit price (USD)').fill('50000');
+  await page.getByRole('button', { name: 'Submit Order' }).click();
+
+  const notification = page.locator('.trade-submitted');
+  await expect(notification).toContainText('Filled at 50,125 USD');
+  await expect(notification).toContainText('Slippage +0.2500%');
 });
 
 test('warns and does not send an order while trading is disabled', async ({ page }) => {

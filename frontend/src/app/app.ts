@@ -39,6 +39,7 @@ import { RecentTradesComponent } from './components/recent-trades.component';
 import { OrderFormComponent } from './components/order-form.component';
 import { SimpleTableComponent } from './components/simple-table.component';
 import { OrderRequest } from './models';
+import { orderReferencePrice, orderSubmissionMessage } from './order-notification';
 
 const panelTitles: Record<PanelId, string> = {
   'chart': 'Chart',
@@ -352,9 +353,12 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
 
   submitOrder(payload: OrderRequest) {
     if (!this.guardTrading()) return;
+    const market = this.selectedMarket();
+    const referencePrice = orderReferencePrice(payload, market?.markPx);
+    const quote = market?.quote ?? 'USD';
     this.api.submitOrder(payload)
       .pipe(takeUntil(this.destroy$))
-      .subscribe((result) => this.handleWriteResult(result));
+      .subscribe((result) => this.handleOrderSubmission(result, payload, referencePrice, quote));
   }
 
   sendLeverage(mode: 'cross' | 'isolated') {
@@ -607,6 +611,24 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
     if (result.status === 'error') {
       this.showTradingWarning(result.message || 'The exchange rejected the trading action.');
     }
+  }
+
+  private handleOrderSubmission(
+    result: OrderWriteResult,
+    order: OrderRequest,
+    referencePrice: string | undefined,
+    quote: string,
+  ): void {
+    if (result.status === 'error') {
+      this.handleWriteResult(result);
+      return;
+    }
+    this.snackBar.open(orderSubmissionMessage(result, order, referencePrice, quote), 'Dismiss', {
+      duration: 7000,
+      horizontalPosition: 'center',
+      verticalPosition: 'top',
+      panelClass: ['trade-submitted'],
+    });
   }
 
   private showTradingWarning(message: string): void {
