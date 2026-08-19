@@ -204,8 +204,10 @@
                   @case ('positions') {
                     <app-panel [title]="panelTitles['positions']">
                       <app-simple-table
+                        class="strong-first-column"
                         [headers]="['Symbol', 'Side', 'Size', 'Entry', 'Mark', 'PnL', 'Lev', 'Liquidation']"
                         [rows]="positionsRows()"
+                        [cellClass]="positionCellClass"
                       ></app-simple-table>
                     </app-panel>
                   }

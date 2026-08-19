@@ -1,6 +1,12 @@
 import { CommonModule } from '@angular/common';
 import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 
+export type SimpleTableCellClass = (
+  cell: unknown,
+  row: readonly unknown[],
+  columnIndex: number,
+) => string;
+
 @Component({
   selector: 'app-simple-table',
   standalone: true,
@@ -26,8 +32,8 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
           } @else {
             @for (row of rows; track $index) {
               <tr>
-                @for (cell of row; track $index) {
-                  <td>{{ cell }}</td>
+                @for (cell of row; track $index; let columnIndex = $index) {
+                  <td [ngClass]="resolveCellClass(cell, row, columnIndex)">{{ cell }}</td>
                 }
               </tr>
             }
@@ -38,6 +44,10 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
   `,
   styles: [
     `
+      :host(.strong-first-column) td:first-child {
+        font-weight: 700;
+      }
+
       .table-wrap {
         overflow: auto;
         min-height: 0;
@@ -75,10 +85,25 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
         text-align: center;
         color: var(--fakemex-muted);
       }
+
+      td.cell-buy,
+      td.cell-positive {
+        color: var(--fakemex-buy);
+      }
+
+      td.cell-sell,
+      td.cell-negative {
+        color: var(--fakemex-sell);
+      }
     `,
   ],
 })
 export class SimpleTableComponent {
   @Input() headers: string[] = [];
   @Input() rows: unknown[][] = [];
+  @Input() cellClass?: SimpleTableCellClass;
+
+  resolveCellClass(cell: unknown, row: readonly unknown[], columnIndex: number): string {
+    return this.cellClass?.(cell, row, columnIndex) ?? '';
+  }
 }

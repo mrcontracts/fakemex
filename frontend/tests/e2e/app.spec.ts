@@ -76,8 +76,47 @@ test('order form expresses size and price units with BTC/USD', async ({ page }) 
   await expect(orderPanel.locator('.order-notional')).toHaveText('Est. notional 200 USD');
 });
 
+test('styles position symbols, sides, and PnL by meaning', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+
+  const cells = page.locator('.grid-stack-item[gs-id="positions"] tbody tr').first().locator('td');
+  const symbol = cells.nth(0);
+  const side = cells.nth(1);
+  const pnl = cells.nth(5);
+
+  await expect(symbol).toHaveCSS('font-weight', '700');
+  const sideValue = (await side.textContent())?.trim().toLowerCase();
+  expect(sideValue === 'buy' || sideValue === 'sell').toBe(true);
+  await expect(side).toHaveClass(sideValue === 'buy' ? /cell-buy/ : /cell-sell/);
+
+  const pnlValue = Number((await pnl.textContent())?.replace(/[,\s%$]/g, ''));
+  expect(Number.isFinite(pnlValue) && pnlValue !== 0).toBe(true);
+  await expect(pnl).toHaveClass(pnlValue > 0 ? /cell-positive/ : /cell-negative/);
+
+  const colors = await page.evaluate(() => {
+    const probe = document.createElement('span');
+    const rootStyle = getComputedStyle(document.documentElement);
+    probe.style.color = rootStyle.getPropertyValue('--fakemex-buy');
+    document.body.appendChild(probe);
+    const buy = getComputedStyle(probe).color;
+    probe.style.color = rootStyle.getPropertyValue('--fakemex-sell');
+    const sell = getComputedStyle(probe).color;
+    probe.remove();
+    return { buy, sell };
+  });
+  await expect(side).toHaveCSS('color', sideValue === 'buy' ? colors.buy : colors.sell);
+  await expect(pnl).toHaveCSS('color', pnlValue > 0 ? colors.buy : colors.sell);
+});
+
 test('warns and does not send an order while trading is disabled', async ({ page }) => {
   let orderPosts = 0;
+  await page.route('**/api/v1/trading', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ available: true, enabled: false, network: 'testnet' }),
+    });
+  });
   page.on('request', (request) => {
     if (request.method() === 'POST' && request.url().endsWith('/api/v1/orders')) {
       orderPosts += 1;

@@ -210,6 +210,19 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
       position.liquidation ?? '--',
     ]),
   );
+  readonly positionCellClass = (cell: unknown, _row: readonly unknown[], columnIndex: number): string => {
+    const value = String(cell).trim().toLowerCase();
+    if (columnIndex === 1) {
+      if (value === 'buy') return 'cell-buy';
+      if (value === 'sell') return 'cell-sell';
+    }
+    if (columnIndex === 5) {
+      const numericValue = Number(value.replace(/[,\s%$]/g, ''));
+      if (Number.isFinite(numericValue) && numericValue > 0) return 'cell-positive';
+      if (Number.isFinite(numericValue) && numericValue < 0) return 'cell-negative';
+    }
+    return '';
+  };
   readonly ordersRows = computed(() =>
     this.api.orders().map((order) => [
       order.oid,
