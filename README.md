@@ -83,6 +83,20 @@ configured `FRONTEND_ORIGIN`.
 Open <http://127.0.0.1:4200>. Angular proxies `/api` and WebSocket traffic to
 the loopback Go service at `127.0.0.1:8080`.
 
+### Windows with WSL 2
+
+Keep the repository inside the WSL Linux filesystem so dependency installation
+is fast and `chmod 600 config/local.env` works as expected. From PowerShell,
+run the wrapper with the WSL distribution and Linux project path:
+
+```powershell
+.\start-wsl.ps1 -Distro Ubuntu -ProjectPath '~/FakeMex'
+```
+
+Both arguments are configurable. Omit `-Distro` to use the default WSL
+distribution. The wrapper stays attached to `launch.sh`, so `Ctrl+C` performs
+the launcher's normal cleanup and its exit code is returned to PowerShell.
+
 ## Verify
 
 ```sh
