@@ -21,7 +21,9 @@ account, and order data use Hyperliquid's official API.
 - Bash, `curl`, CA certificates, and `ss` from `iproute2`
 - A C build toolchain (`build-essential` on Ubuntu) for the Go dependencies
 
-## Install on Ubuntu or WSL 2
+## Install on Linux
+
+### Ubuntu or WSL 2
 
 Install the required system packages:
 
@@ -32,7 +34,21 @@ sudo apt install -y build-essential ca-certificates curl git iproute2 make
 
 Ubuntu's package repositories may contain older Node.js or Go releases. Install
 the versions listed above using their official distributions or your preferred
-version manager, then verify them before continuing:
+version manager.
+
+### Arch Linux
+
+Update the system and install the runtime, compiler, and development tools from
+the official repositories:
+
+```sh
+sudo pacman -Syu --needed \
+  base-devel ca-certificates curl git go iproute2 nodejs npm
+```
+
+### Finish the installation
+
+Verify the required tool versions before continuing:
 
 ```sh
 node --version
@@ -137,14 +153,20 @@ the launcher's normal cleanup and its exit code is returned to PowerShell.
 
 ## Verify
 
-The first end-to-end test run also needs Playwright's Chromium browser and its
-Linux system dependencies:
+On Ubuntu or WSL, the first end-to-end test run also needs Playwright's Chromium
+browser and its Linux system dependencies:
 
 ```sh
 cd frontend
 npx playwright install --with-deps chromium
 cd ..
 ```
+
+Playwright does not officially list Arch Linux as a supported host. On Arch,
+install its Chromium build with `npx playwright install chromium`; if its system
+dependencies are incompatible, run the end-to-end tests in a supported
+Debian/Ubuntu container or CI environment instead. This limitation affects the
+browser tests, not the application itself.
 
 Then run the complete checks and production builds:
 
