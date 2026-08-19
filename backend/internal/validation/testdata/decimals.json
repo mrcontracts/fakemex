@@ -1,0 +1,12 @@
+[
+  {"name":"integer", "value":"1", "wantErr": false},
+  {"name":"decimal", "value":"12.34", "wantErr": false},
+  {"name":"zero", "value":"0", "wantErr": false},
+  {"name":"leading zero", "value":"01.2", "wantErr": true},
+  {"name":"trailing dot", "value":"1.", "wantErr": true},
+  {"name":"negative", "value":"-1", "wantErr": true},
+  {"name":"not number", "value":"abc", "wantErr": true},
+  {"name":"scale-3", "value":"1.234", "scale":3, "wantErr": false},
+  {"name":"space padded", "value":" 1.2 ", "wantErr": true},
+  {"name":"scale-limit", "value":"1.234", "scale":2, "wantErr": false}
+]

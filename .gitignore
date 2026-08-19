@@ -1,0 +1,27 @@
+# Local credentials and environment
+config/local.env
+config/*.env
+.env
+.env.*
+!.env.example
+
+# Frontend dependencies and output
+frontend/node_modules/
+frontend/dist/
+frontend/.angular/
+frontend/test-results/
+frontend/playwright-report/
+frontend/test-artifacts/
+frontend/coverage/
+
+# Backend output and local state
+backend/bin/
+backend/coverage.out
+backend/*.test
+.run/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,44 @@
+{
+  "name": "frontend",
+  "version": "0.0.0",
+  "scripts": {
+    "ng": "ng",
+    "start": "ng serve",
+    "build": "ng build",
+    "watch": "ng build --watch --configuration development",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "private": true,
+  "packageManager": "npm@12.0.2",
+  "dependencies": {
+    "@angular/animations": "^22.1.2",
+    "@angular/cdk": "^22.1.2",
+    "@angular/common": "^22.1.0",
+    "@angular/compiler": "^22.1.0",
+    "@angular/core": "^22.1.0",
+    "@angular/forms": "^22.1.0",
+    "@angular/material": "^22.1.2",
+    "@angular/platform-browser": "^22.1.0",
+    "@angular/platform-browser-dynamic": "^22.1.0",
+    "@angular/router": "^22.1.0",
+    "gridstack": "^13.1.2",
+    "lightweight-charts": "^5.2.1",
+    "rxjs": "~7.8.0",
+    "tslib": "^2.3.0"
+  },
+  "devDependencies": {
+    "@angular/build": "^22.1.0",
+    "@angular/cli": "^22.1.0",
+    "@angular/compiler-cli": "^22.1.0",
+    "@playwright/test": "^1.47.0",
+    "@testing-library/angular": "^16.0.0",
+    "happy-dom": "^20.11.2",
+    "playwright": "^1.47.0",
+    "prettier": "^3.8.1",
+    "typescript": "~6.0.2",
+    "vite": "^7.0.0",
+    "vitest": "^4.1.11"
+  }
+}

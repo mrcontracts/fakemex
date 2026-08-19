@@ -1,0 +1,355 @@
+<div
+  class="fakemex-shell"
+  [class.dark]="theme.activeTheme().variant === 'dark'"
+  [class.light]="theme.activeTheme().variant === 'light'"
+  [class.compact]="layout.density() === 'compact'"
+  [class.spacious]="layout.density() === 'spacious'"
+>
+  <mat-toolbar class="topbar">
+    <div class="topbar-left">
+      <div class="brand">
+        <h1>FakeMex</h1>
+        <p>Dark trading terminal</p>
+      </div>
+
+      <mat-form-field appearance="outline" class="toolbar-field">
+        <mat-label>Instrument</mat-label>
+        <mat-select [value]="data.selectedSymbol()" (selectionChange)="onSymbolSelection($event)">
+          @for (market of data.markets(); track market.symbol) {
+            <mat-option [value]="market.symbol">{{ market.base }} / {{ market.quote }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <div class="ticker-metrics" aria-live="polite">
+        <span class="metric">{{ marketMark() }}</span>
+        <span class="metric" [class.good]="marketMarkStatus().startsWith('+')" [class.bad]="marketMarkStatus().startsWith('-')">
+          {{ marketMarkStatus() }}
+        </span>
+        <span class="metric">Funding {{ marketFunding() }}</span>
+        <span class="metric">Lev {{ marketLeverage() }}x</span>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <button type="button" mat-stroked-button (click)="data.bootstrap(data.selectedSymbol(), data.interval())">Refresh</button>
+      <mat-slide-toggle
+        class="trading-toggle"
+        color="warn"
+        [checked]="tradingStatus().enabled"
+        [disabled]="!tradingStatus().available || tradingToggleBusy()"
+        [attr.aria-label]="tradingStatus().enabled ? 'Disable trading' : 'Enable trading'"
+        (change)="onTradingToggle($event.checked)"
+      >
+        Trading {{ tradingStatus().enabled ? 'ON' : 'OFF' }}
+      </mat-slide-toggle>
+      <span class="status status-inline" [class]="statusToneClass()">{{ statusText() }}</span>
+      <span
+        class="status-inline margin-mode-badge"
+        role="status"
+        [class]="marginModeToneClass()"
+        [attr.aria-label]="'Margin mode ' + marginMode()"
+      >
+        {{ marginMode() }}
+      </span>
+      <button
+        type="button"
+        mat-stroked-button
+        (click)="setPreset(layout.preset() === 'custom' ? 'advanced' : 'custom')"
+      >
+        {{ layout.preset() === 'custom' ? 'Use advanced' : 'Use custom' }}
+      </button>
+    </div>
+  </mat-toolbar>
+
+  @if (!isNarrow()) {
+    <section class="control-strip">
+      <mat-form-field appearance="outline" class="strip-control">
+        <mat-label>Preset</mat-label>
+        <mat-select [value]="layout.preset()" (selectionChange)="onPresetSelection($event)">
+          @for (preset of layoutPresets; track preset) {
+            <mat-option [value]="preset">{{ preset }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" class="strip-control">
+        <mat-label>Density</mat-label>
+        <mat-select [value]="layout.density()" (selectionChange)="onDensitySelection($event)">
+          <mat-option value="compact">Compact</mat-option>
+          <mat-option value="normal">Normal</mat-option>
+          <mat-option value="spacious">Spacious</mat-option>
+        </mat-select>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" class="theme-field strip-theme">
+        <mat-label>Theme selector</mat-label>
+        <input
+          type="search"
+          matInput
+          autocomplete="off"
+          placeholder="Search Kitty themes"
+          aria-label="Theme selector"
+          [formControl]="themePickerControl"
+          (input)="onThemeSearch($event)"
+          (keydown.enter)="onThemeApply()"
+          [matAutocomplete]="themeAuto"
+        />
+        <mat-autocomplete #themeAuto="matAutocomplete" (optionSelected)="onThemeOptionSelected($event)">
+          @for (entry of theme.filteredThemes(); track entry.id) {
+            <mat-option [value]="entry.label">{{ entry.label }}</mat-option>
+          }
+        </mat-autocomplete>
+      </mat-form-field>
+      <button
+        type="button"
+        class="strip-control theme-apply"
+        mat-stroked-button
+        color="primary"
+        (click)="onThemeApply()"
+      >
+        Apply
+      </button>
+      <div class="strip-control strip-refresh">
+        <div class="refresh-meta" aria-live="polite">
+          <span>{{ refreshFrequencyLabel() }}</span>
+          <span class="refresh-value">{{ refreshFrequency() }}</span>
+        </div>
+        <mat-slider
+          class="refresh-slider"
+          [min]="refreshBounds.min"
+          [max]="refreshBounds.max"
+          [step]="refreshBounds.step"
+          discrete
+        >
+          <input
+            matSliderThumb
+            [value]="data.refreshIntervalMs()"
+            aria-label="Recovery frequency"
+            (valueChange)="onRefreshFrequency($event)"
+          />
+        </mat-slider>
+      </div>
+    </section>
+  }
+
+  <div
+    class="connection-toast"
+    [class.offline]="connectionTone() === 'offline'"
+    [class.demo]="connectionTone() === 'demo'"
+    [class.reconnecting]="connectionTone() === 'reconnecting'"
+  >
+    <span class="dot"></span>
+    <span>{{ connectionBannerText() }}</span>
+    @if (data.error()) {
+      <details>
+        <summary>details</summary>
+        <p>{{ data.error() }}</p>
+      </details>
+    }
+  </div>
+
+  <section class="workspace">
+    @if (!isNarrow()) {
+      <section class="grid-wrap">
+        <div class="grid-stack" #gridRoot>
+          @for (item of layoutItems(); track item.id) {
+            <div
+              class="grid-stack-item"
+              [attr.gs-id]="item.id"
+              [attr.gs-x]="item.x"
+              [attr.gs-y]="item.y"
+              [attr.gs-w]="item.w"
+              [attr.gs-h]="item.h"
+            >
+              <div class="grid-stack-item-content">
+                @switch (item.id) {
+                @case ('order-form') {
+                    <app-panel [title]="panelTitles['order-form']">
+                      <app-order-form
+                        [symbol]="data.selectedSymbol()"
+                        [base]="selectedMarket()?.base ?? 'BTC'"
+                        [quote]="selectedMarket()?.quote ?? 'USD'"
+                        [markPrice]="selectedMarket()?.markPx ?? ''"
+                        (sendOrder)="submitOrder($event)"
+                      ></app-order-form>
+                    </app-panel>
+                  }
+                  @case ('chart') {
+                    <app-panel [title]="panelTitles['chart']">
+                      <app-market-chart
+                        [symbol]="data.selectedSymbol()"
+                        [candles]="data.candles()"
+                        [connectionStatus]="chartStatus()"
+                        [selectedInterval]="data.interval()"
+                        (intervalRequested)="selectInterval($event)"
+                      ></app-market-chart>
+                    </app-panel>
+                  }
+                  @case ('depth') {
+                    <app-panel [title]="panelTitles['depth']">
+                      <app-depth-chart [book]="data.book()"></app-depth-chart>
+                    </app-panel>
+                  }
+                  @case ('book') {
+                    <app-panel [title]="panelTitles['book']">
+                      <app-order-book [book]="data.book()"></app-order-book>
+                    </app-panel>
+                  }
+                  @case ('trades') {
+                    <app-panel [title]="panelTitles['trades']">
+                      <app-recent-trades [trades]="data.trades()"></app-recent-trades>
+                    </app-panel>
+                  }
+                  @case ('positions') {
+                    <app-panel [title]="panelTitles['positions']">
+                      <app-simple-table
+                        [headers]="['Symbol', 'Side', 'Size', 'Entry', 'Mark', 'PnL', 'Lev', 'Liquidation']"
+                        [rows]="positionsRows()"
+                      ></app-simple-table>
+                    </app-panel>
+                  }
+                  @case ('orders') {
+                    <app-panel [title]="panelTitles['orders']">
+                      <app-simple-table
+                        [headers]="['ID', 'Symbol', 'Side', 'Kind', 'Size', 'Price', 'RO', 'Status']"
+                        [rows]="ordersRows()"
+                      ></app-simple-table>
+                    </app-panel>
+                  }
+                  @case ('triggers') {
+                    <app-panel [title]="panelTitles['triggers']">
+                      <app-simple-table
+                        [headers]="['ID', 'Symbol', 'Side', 'Kind', 'Trigger', 'Limit', 'Status']"
+                        [rows]="triggerRows()"
+                      ></app-simple-table>
+                    </app-panel>
+                  }
+                  @case ('fills') {
+                    <app-panel [title]="panelTitles['fills']">
+                      <app-simple-table
+                        [headers]="['ID', 'Symbol', 'Side', 'Px', 'Qty', 'Fee']"
+                        [rows]="fillsRows()"
+                      ></app-simple-table>
+                    </app-panel>
+                  }
+                  @case ('history') {
+                    <app-panel [title]="panelTitles['history']">
+                      <app-simple-table
+                        [headers]="['Time', 'Symbol', 'Side', 'Px', 'Qty']"
+                        [rows]="historyRows()"
+                      ></app-simple-table>
+                    </app-panel>
+                  }
+                  @case ('funding') {
+                    <app-panel [title]="panelTitles['funding']">
+                      <app-simple-table
+                        [headers]="['Symbol', 'Rate', 'Payment', 'Time']"
+                        [rows]="fundingRows()"
+                      ></app-simple-table>
+                    </app-panel>
+                  }
+                  @case ('assets') {
+                    <app-panel [title]="panelTitles['assets']">
+                      <app-simple-table
+                        [headers]="['Coin', 'Wallet', 'Available', 'Used']"
+                        [rows]="assetsRows()"
+                      ></app-simple-table>
+                    </app-panel>
+                  }
+                  @case ('leverage') {
+                    <app-panel [title]="panelTitles['leverage']">
+                      <div class="leverage">
+                        <p>Mode: {{ data.selectedMode() }}</p>
+                        <label class="slider-label" aria-hidden="true">Leverage {{ leverageValue() }}x</label>
+                        <mat-slider
+                          class="leverage-slider"
+                          [discrete]="true"
+                          [min]="1"
+                          [max]="data.selectedMarket()?.leverage.maxLeverage ?? 100"
+                          [step]="1"
+                        >
+                          <input
+                            matSliderThumb
+                            aria-label="Set leverage"
+                            [value]="leverageValue()"
+                            (valueChange)="setLeverage($event)"
+                          />
+                        </mat-slider>
+                        <button type="button" mat-stroked-button (click)="sendLeverage('cross')">Set Cross</button>
+                        <button type="button" mat-stroked-button (click)="sendLeverage('isolated')">Set Isolated</button>
+                        <button type="button" mat-stroked-button color="warn" (click)="closePositions(100)">Close all</button>
+                      </div>
+                    </app-panel>
+                  }
+                  @default {
+                    <app-panel [title]="panelTitles['settings']">
+                      <div class="settings">
+                        <p>Connected symbol: {{ data.market()?.symbol ?? '--' }}</p>
+                        <p>Session margin: {{ data.margin().crossBalance }}</p>
+                        <p>Available: {{ data.margin().availableBalance }}</p>
+                      </div>
+                    </app-panel>
+                  }
+                }
+              </div>
+            </div>
+          }
+        </div>
+      </section>
+    } @else {
+      <section class="mobile-panels">
+        <mat-tab-group
+          class="mobile-tabs"
+          [selectedIndex]="activeTabIndex()"
+          (selectedIndexChange)="onMobileTabChange($event)"
+        >
+          @for (item of layout.panelIds; track item) {
+            <mat-tab [label]="panelTitles[item]"></mat-tab>
+          }
+        </mat-tab-group>
+        <div class="mobile-panel">
+          @switch (activeTab()) {
+            @case ('chart') {
+              <app-panel [title]="panelTitles['chart']">
+                <app-market-chart
+                  [symbol]="data.selectedSymbol()"
+                  [candles]="data.candles()"
+                  [connectionStatus]="chartStatus()"
+                  [selectedInterval]="data.interval()"
+                  (intervalRequested)="selectInterval($event)"
+                ></app-market-chart>
+              </app-panel>
+            }
+            @case ('order-form') {
+              <app-panel [title]="panelTitles['order-form']">
+                <app-order-form
+                  [symbol]="data.selectedSymbol()"
+                  [base]="selectedMarket()?.base ?? 'BTC'"
+                  [quote]="selectedMarket()?.quote ?? 'USD'"
+                  [markPrice]="selectedMarket()?.markPx ?? ''"
+                  (sendOrder)="submitOrder($event)"
+                ></app-order-form>
+              </app-panel>
+            }
+            @case ('book') {
+              <app-panel [title]="panelTitles['book']">
+                <app-order-book [book]="data.book()"></app-order-book>
+              </app-panel>
+            }
+            @case ('trades') {
+              <app-panel [title]="panelTitles['trades']">
+                <app-recent-trades [trades]="data.trades()"></app-recent-trades>
+              </app-panel>
+            }
+            @default {
+              <app-panel [title]="panelTitles[activeTab()]">
+                <p>{{ activeTab() | titlecase }} panel for the active symbol.</p>
+              </app-panel>
+            }
+          }
+        </div>
+      </section>
+    }
+  </section>
+</div>
