@@ -8,7 +8,11 @@
 }
 
 .trade-submitted {
-  --mdc-snackbar-container-color: color-mix(in srgb, var(--fakemex-buy) 35%, var(--fakemex-panel-bg) 65%);
+  --mdc-snackbar-container-color: color-mix(
+    in srgb,
+    var(--fakemex-buy) 35%,
+    var(--fakemex-panel-bg) 65%
+  );
   --mdc-snackbar-supporting-text-color: var(--fakemex-text);
   --mat-snack-bar-button-color: var(--fakemex-text);
 }
@@ -83,7 +87,7 @@
   --mat-sys-outline-variant: #2f3b5c;
   --mat-sys-error: #e57373;
   --mat-app-background-color: #15161e;
-  --mat-app-background-color-rgb: 21,22,30;
+  --mat-app-background-color-rgb: 21, 22, 30;
 }
 
 html,
@@ -103,6 +107,43 @@ body {
 
 a {
   color: inherit;
+}
+
+.fakemex-shell .mat-mdc-slide-toggle.network-toggle,
+.fakemex-shell .mat-mdc-slide-toggle.trading-toggle {
+  --mat-slide-toggle-label-text-color: var(--fakemex-text);
+  --mat-slide-toggle-disabled-label-text-color: var(--fakemex-muted);
+  --mat-slide-toggle-label-text-size: 0.78rem;
+  --mat-slide-toggle-selected-icon-color: var(--fakemex-buy);
+  --mat-slide-toggle-selected-track-color: color-mix(
+    in srgb,
+    var(--fakemex-buy) 62%,
+    var(--fakemex-panel-bg) 38%
+  );
+  --mat-slide-toggle-selected-hover-track-color: var(--fakemex-buy);
+  --mat-slide-toggle-selected-focus-track-color: var(--fakemex-buy);
+  --mat-slide-toggle-selected-pressed-track-color: var(--fakemex-buy);
+  --mat-slide-toggle-selected-handle-color: var(--fakemex-panel-bg);
+  --mat-slide-toggle-selected-hover-handle-color: var(--fakemex-panel-header);
+  --mat-slide-toggle-selected-focus-handle-color: var(--fakemex-panel-header);
+  --mat-slide-toggle-selected-pressed-handle-color: var(--fakemex-panel-header);
+  --mat-slide-toggle-selected-hover-state-layer-color: var(--fakemex-buy);
+  --mat-slide-toggle-selected-focus-state-layer-color: var(--fakemex-buy);
+  --mat-slide-toggle-selected-pressed-state-layer-color: var(--fakemex-buy);
+  --mat-slide-toggle-disabled-selected-icon-color: var(--fakemex-buy);
+  --mat-slide-toggle-disabled-selected-track-color: color-mix(
+    in srgb,
+    var(--fakemex-buy) 42%,
+    var(--fakemex-panel-bg) 58%
+  );
+}
+
+.fakemex-shell .mat-mdc-slide-toggle.network-toggle {
+  --mat-slide-toggle-label-text-weight: 700;
+}
+
+.fakemex-shell .mat-mdc-slide-toggle.network-toggle.mainnet-active {
+  --mat-slide-toggle-label-text-color: var(--fakemex-sell);
 }
 
 .margin-mode-badge {

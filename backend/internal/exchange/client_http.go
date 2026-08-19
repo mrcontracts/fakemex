@@ -30,6 +30,7 @@ type safeClient struct {
 	logger         *slog.Logger
 	signingKey     *ecdsa.PrivateKey
 	vaultAddress   string
+	isMainnet      bool
 	nonceMu        sync.Mutex
 	lastNonce      int64
 }

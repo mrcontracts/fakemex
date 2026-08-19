@@ -3,7 +3,10 @@ import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { PLATFORM_ID } from '@angular/core';
-import { BrowserDynamicTestingModule, platformBrowserDynamicTesting } from '@angular/platform-browser-dynamic/testing';
+import {
+  BrowserDynamicTestingModule,
+  platformBrowserDynamicTesting,
+} from '@angular/platform-browser-dynamic/testing';
 import { FakeMexDataService } from './fakemex-data.service';
 import type { Asset, MarketMeta, Order, Position, StreamEnvelope, TriggerOrder } from '../models';
 import { demoSnapshot } from '../mock-data';
@@ -12,7 +15,7 @@ function ensureLocalStorage() {
   if (typeof globalThis.localStorage === 'undefined') {
     const store = new Map<string, string>();
     globalThis.localStorage = {
-      getItem: (key) => (store.has(key) ? store.get(key) ?? null : null),
+      getItem: (key) => (store.has(key) ? (store.get(key) ?? null) : null),
       setItem: (key, value) => {
         store.set(key, String(value));
       },
@@ -79,7 +82,12 @@ describe('FakeMexDataService', () => {
 
   function createService() {
     TestBed.configureTestingModule({
-      providers: [provideHttpClient(), provideHttpClientTesting(), { provide: PLATFORM_ID, useValue: 'browser' }, FakeMexDataService],
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        { provide: PLATFORM_ID, useValue: 'browser' },
+        FakeMexDataService,
+      ],
     });
     const service = TestBed.inject(FakeMexDataService);
     const controller = TestBed.inject(HttpTestingController);
@@ -87,12 +95,18 @@ describe('FakeMexDataService', () => {
   }
 
   const bootstrapRequest = (controller: HttpTestingController) => {
-    controller.expectOne((request) => request.url.startsWith('/api/v1/bootstrap')).flush(demoSnapshot);
-    controller.expectOne('/api/v1/trading').flush({ available: true, enabled: false, network: 'testnet' });
+    controller
+      .expectOne((request) => request.url.startsWith('/api/v1/bootstrap'))
+      .flush(demoSnapshot);
+    controller
+      .expectOne('/api/v1/trading')
+      .flush({ available: true, enabled: false, network: 'testnet' });
   };
 
   const emitStreamEvent = (service: FakeMexDataService, event: StreamEnvelope<unknown>) => {
-    (service as unknown as { applyStream: (payload: StreamEnvelope<unknown>) => void }).applyStream(event);
+    (service as unknown as { applyStream: (payload: StreamEnvelope<unknown>) => void }).applyStream(
+      event,
+    );
   };
 
   it('loads persisted refresh interval preference and clamps unsafe values', () => {
@@ -137,7 +151,9 @@ describe('FakeMexDataService', () => {
     vi.advanceTimersByTime(8_000);
     expect(MockWebSocket.instances).toHaveLength(2);
 
-    const extraRequests = controller.match((request) => request.url.startsWith('/api/v1/bootstrap'));
+    const extraRequests = controller.match((request) =>
+      request.url.startsWith('/api/v1/bootstrap'),
+    );
     expect(extraRequests).toHaveLength(0);
 
     service.destroy();
@@ -383,7 +399,11 @@ describe('FakeMexDataService', () => {
     const { service, controller } = createService();
     bootstrapRequest(controller);
 
-    expect(service.tradingStatus()).toEqual({ available: true, enabled: false, network: 'testnet' });
+    expect(service.tradingStatus()).toEqual({
+      available: true,
+      enabled: false,
+      network: 'testnet',
+    });
     let observed = false;
     service.setTradingEnabled(true).subscribe((status) => {
       observed = status.enabled;
@@ -401,24 +421,60 @@ describe('FakeMexDataService', () => {
     controller.verify();
   });
 
+  it('switches networks only after backend acceptance and refreshes the snapshot', () => {
+    const { service, controller } = createService();
+    bootstrapRequest(controller);
+
+    expect(service.networkStatus().network).toBe('testnet');
+    let observed = 'testnet';
+    service.setNetwork('mainnet').subscribe((status) => {
+      observed = status.network;
+    });
+    expect(service.networkStatus().network).toBe('testnet');
+
+    controller.expectOne({ method: 'PUT', url: '/api/v1/network' }).flush({
+      network: 'mainnet',
+      availableNetworks: ['testnet', 'mainnet'],
+      tradingAvailable: true,
+      tradingEnabled: false,
+    });
+    expect(observed).toBe('mainnet');
+    expect(service.networkStatus().network).toBe('mainnet');
+    expect(service.tradingStatus()).toEqual({
+      available: true,
+      enabled: false,
+      network: 'mainnet',
+    });
+    controller
+      .expectOne((request) => request.url.startsWith('/api/v1/bootstrap'))
+      .flush(demoSnapshot);
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    service.destroy();
+    controller.verify();
+  });
+
   it('never simulates a successful order in demo mode', () => {
     const { service, controller } = createService();
-    controller.expectOne((request) => request.url.startsWith('/api/v1/bootstrap')).flush(
-      { detail: 'offline' },
-      { status: 503, statusText: 'Unavailable' },
-    );
-    controller.expectOne('/api/v1/trading').flush({ available: false, enabled: false, network: 'testnet' });
+    controller
+      .expectOne((request) => request.url.startsWith('/api/v1/bootstrap'))
+      .flush({ detail: 'offline' }, { status: 503, statusText: 'Unavailable' });
+    controller
+      .expectOne('/api/v1/trading')
+      .flush({ available: false, enabled: false, network: 'testnet' });
 
     let resultStatus = '';
-    service.submitOrder({
-      symbol: 'BTC',
-      side: 'buy',
-      kind: 'market',
-      size: '0.01',
-      reduceOnly: false,
-    }).subscribe((result) => {
-      resultStatus = result.status;
-    });
+    service
+      .submitOrder({
+        symbol: 'BTC',
+        side: 'buy',
+        kind: 'market',
+        size: '0.01',
+        reduceOnly: false,
+      })
+      .subscribe((result) => {
+        resultStatus = result.status;
+      });
     expect(resultStatus).toBe('error');
     expect(controller.match('/api/v1/orders')).toHaveLength(0);
 

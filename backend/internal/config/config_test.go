@@ -45,7 +45,7 @@ func TestLoadConfigSuccessAndAddressValidation(t *testing.T) {
 	}
 }
 
-func TestLoadConfigMissingNetwork(t *testing.T) {
+func TestLoadConfigDefaultsToTestnet(t *testing.T) {
 	t.Parallel()
 
 	cfgPath := writeTempConfig(t, strings.Join([]string{
@@ -54,8 +54,25 @@ func TestLoadConfigMissingNetwork(t *testing.T) {
 		"SERVER_ADDR=127.0.0.1:8080",
 		"FRONTEND_ORIGIN=http://localhost:4200",
 	}, "\n"))
-	if _, err := config.Load(cfgPath); err == nil {
-		t.Fatal("expected error")
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.HLNetwork != config.NetworkTestnet || cfg.HLAPIURL != config.TestnetAPIURL {
+		t.Fatalf("expected testnet startup defaults, got network=%q api=%q", cfg.HLNetwork, cfg.HLAPIURL)
+	}
+}
+
+func TestLoadRejectsMainnetAsStartupNetwork(t *testing.T) {
+	t.Parallel()
+
+	cfgPath := writeTempConfig(t, strings.Join([]string{
+		"HL_NETWORK=mainnet",
+		"SERVER_ADDR=127.0.0.1:8080",
+		"FRONTEND_ORIGIN=http://localhost:4200",
+	}, "\n"))
+	if _, err := config.Load(cfgPath); err == nil || !strings.Contains(err.Error(), "startup network must be testnet") {
+		t.Fatalf("expected guarded startup error, got %v", err)
 	}
 }
 
@@ -112,30 +129,96 @@ func TestHasAccount(t *testing.T) {
 	if !cfg.HasAccount() {
 		t.Fatal("expected account configured")
 	}
+	if !cfg.HasTradingCredentials() {
+		t.Fatal("expected complete trading credentials")
+	}
+	if cfg.CanTrade() {
+		t.Fatal("credentials alone must not permit trading")
+	}
+	cfg.TradingAllowed = true
+	if !cfg.CanTrade() {
+		t.Fatal("process permission and complete credentials must permit trading")
+	}
 
 	cfg.HLAPIWalletPrivateKey = ""
 	if !cfg.HasAccount() {
 		t.Fatal("account reads only require the account address")
 	}
+	if cfg.HasTradingCredentials() {
+		t.Fatal("missing private key must make the trading profile incomplete")
+	}
 	if cfg.CanTrade() {
-		t.Fatal("trading must require explicit enablement and wallet credentials")
+		t.Fatal("trading must require both process permission and wallet credentials")
 	}
 }
 
-func TestTradingRequiresWalletCredentialsAndOfficialEndpoints(t *testing.T) {
+func TestTradingRequiresWalletCredentials(t *testing.T) {
 	t.Parallel()
 
 	cfgPath := writeTempConfig(t, strings.Join([]string{
 		"HL_NETWORK=testnet",
-		"HL_API_URL=https://example.test",
-		"HL_WS_URL=wss://example.test/ws",
+		"HL_API_URL=https://api.hyperliquid-testnet.xyz",
+		"HL_WS_URL=wss://api.hyperliquid-testnet.xyz/ws",
 		"HL_ACCOUNT_ADDRESS=0xfeed",
 		"SERVER_ADDR=127.0.0.1:8080",
 		"FRONTEND_ORIGIN=http://localhost:4200",
 		"TRADING_ENABLED=true",
 	}, "\n"))
-	if _, err := config.Load(cfgPath); err == nil || !strings.Contains(err.Error(), "trading requires") {
+	if _, err := config.Load(cfgPath); err == nil || !strings.Contains(err.Error(), "requires complete API-wallet credentials") {
 		t.Fatalf("expected trading configuration error, got %v", err)
+	}
+}
+
+func TestLoadsSeparateMainnetCredentialsWithoutSelectingMainnet(t *testing.T) {
+	t.Parallel()
+
+	key, walletAddress := mustCreateSignedWallet(t)
+	cfgPath := writeTempConfig(t, strings.Join([]string{
+		"HL_MAINNET_ACCOUNT_ADDRESS=0xfeed",
+		"HL_MAINNET_API_WALLET_ADDRESS=" + walletAddress,
+		"HL_MAINNET_API_WALLET_PRIVATE_KEY=" + key,
+		"SERVER_ADDR=127.0.0.1:8080",
+		"FRONTEND_ORIGIN=http://localhost:4200",
+		"TRADING_ENABLED=true",
+	}, "\n"))
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.HLNetwork != config.NetworkTestnet {
+		t.Fatalf("startup must remain testnet, got %q", cfg.HLNetwork)
+	}
+	mainnet, ok := cfg.ForNetwork(config.NetworkMainnet)
+	if !ok || !mainnet.CanTrade() {
+		t.Fatal("expected independently configured mainnet trading profile")
+	}
+	if mainnet.HLAPIURL != config.MainnetAPIURL || mainnet.HLWsURL != config.MainnetWSURL {
+		t.Fatal("expected official mainnet endpoint defaults")
+	}
+}
+
+func TestConfiguredMainnetIsIndependentFromProcessTradingPermission(t *testing.T) {
+	t.Parallel()
+
+	key, walletAddress := mustCreateSignedWallet(t)
+	cfgPath := writeTempConfig(t, strings.Join([]string{
+		"HL_MAINNET_ACCOUNT_ADDRESS=0xfeed",
+		"HL_MAINNET_API_WALLET_ADDRESS=" + walletAddress,
+		"HL_MAINNET_API_WALLET_PRIVATE_KEY=" + key,
+		"SERVER_ADDR=127.0.0.1:8080",
+		"FRONTEND_ORIGIN=http://localhost:4200",
+		"TRADING_ENABLED=false",
+	}, "\n"))
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	mainnet, ok := cfg.ForNetwork(config.NetworkMainnet)
+	if !ok || !mainnet.HasTradingCredentials() {
+		t.Fatal("expected a valid mainnet profile while process trading is disabled")
+	}
+	if mainnet.CanTrade() {
+		t.Fatal("TRADING_ENABLED=false must block signed writes without invalidating mainnet selection")
 	}
 }
 

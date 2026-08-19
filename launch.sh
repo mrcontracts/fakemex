@@ -13,9 +13,6 @@ BACKEND_PORT=8080
 FRONTEND_HOST="127.0.0.1"
 FRONTEND_PORT_DEFAULT=4200
 REQUIRED_KEYS=(
-  HL_NETWORK
-  HL_API_URL
-  HL_WS_URL
   SERVER_ADDR
   FRONTEND_ORIGIN
 )
@@ -298,13 +295,9 @@ trading_enabled="${trading_enabled,,}"
 if [[ "$trading_enabled" != "true" && "$trading_enabled" != "false" ]]; then
   fail "TRADING_ENABLED must be true or false"
 fi
-if [[ "$trading_enabled" == "true" ]]; then
-  for key in HL_ACCOUNT_ADDRESS HL_API_WALLET_ADDRESS HL_API_WALLET_PRIVATE_KEY; do
-    if [[ -z "$(read_config_value "$CONFIG_PATH" "$key")" ]]; then
-      fail "trading config missing required key: $key"
-    fi
-  done
-fi
+# The backend validates each network profile as a unit. Keeping that logic in
+# one place lets TRADING_ENABLED=true coexist with one signed network and one
+# intentionally read-only network.
 
 server_addr="$(read_config_value "$CONFIG_PATH" "SERVER_ADDR")"
 frontend_origin="$(read_config_value "$CONFIG_PATH" "FRONTEND_ORIGIN")"

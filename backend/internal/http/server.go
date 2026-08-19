@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,23 +38,92 @@ var (
 	symbolRE         = regexp.MustCompile(`^[A-Z0-9][A-Z0-9._-]{0,31}$`)
 )
 
+type NetworkBinding struct {
+	Config           config.Config
+	Client           exchange.ExchangeClient
+	Configured       bool
+	TradingAvailable bool
+}
+
+type networkRuntime struct {
+	cfg        config.Config
+	client     exchange.ExchangeClient
+	stream     *stream.Manager
+	configured bool
+	canTrade   bool
+}
+
 type Server struct {
 	cfg            config.Config
-	client         exchange.ExchangeClient
-	stream         *stream.Manager
+	networks       map[string]*networkRuntime
+	active         atomic.Pointer[networkRuntime]
 	logger         *slog.Logger
 	limiter        *rate.Limiter
 	tradingEnabled atomic.Bool
+	networkMux     sync.RWMutex
 }
 
+// NewServer keeps the single-network constructor used by focused HTTP tests.
+// Production uses NewNetworkServer so network changes swap the client, account,
+// signer, and stream manager as one unit.
 func NewServer(cfg config.Config, client exchange.ExchangeClient, logger *slog.Logger) *Server {
-	return &Server{
-		cfg:     cfg,
-		client:  client,
-		stream:  stream.NewManager(client, logger),
-		logger:  logger,
-		limiter: rate.NewLimiter(30, 120),
+	network := strings.ToLower(strings.TrimSpace(cfg.HLNetwork))
+	if network == "" {
+		network = config.NetworkTestnet
+		cfg.HLNetwork = network
 	}
+	server := &Server{
+		cfg:      cfg,
+		networks: make(map[string]*networkRuntime, 1),
+		logger:   logger,
+		limiter:  rate.NewLimiter(30, 120),
+	}
+	runtime := &networkRuntime{
+		cfg:        cfg,
+		client:     client,
+		stream:     stream.NewManager(client, logger),
+		configured: cfg.HasTradingCredentials(),
+		canTrade:   cfg.CanTrade(),
+	}
+	server.networks[network] = runtime
+	server.active.Store(runtime)
+	return server
+}
+
+func NewNetworkServer(cfg config.Config, bindings map[string]NetworkBinding, defaultNetwork string, logger *slog.Logger) (*Server, error) {
+	server := &Server{
+		cfg:      cfg,
+		networks: make(map[string]*networkRuntime, len(bindings)),
+		logger:   logger,
+		limiter:  rate.NewLimiter(30, 120),
+	}
+	for name, binding := range bindings {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" || binding.Client == nil {
+			return nil, fmt.Errorf("invalid network binding %q", name)
+		}
+		if binding.Config.HLNetwork != name {
+			return nil, fmt.Errorf("network binding %q has configuration for %q", name, binding.Config.HLNetwork)
+		}
+		server.networks[name] = &networkRuntime{
+			cfg:        binding.Config,
+			client:     binding.Client,
+			stream:     stream.NewManager(binding.Client, logger),
+			configured: binding.Configured,
+			canTrade:   binding.TradingAvailable,
+		}
+	}
+	defaultNetwork = strings.ToLower(strings.TrimSpace(defaultNetwork))
+	active, ok := server.networks[defaultNetwork]
+	if !ok {
+		return nil, fmt.Errorf("default network %q is not configured", defaultNetwork)
+	}
+	server.active.Store(active)
+	return server, nil
+}
+
+func (s *Server) current() *networkRuntime {
+	return s.active.Load()
 }
 
 func (s *Server) Router() http.Handler {
@@ -66,6 +136,8 @@ func (s *Server) Router() http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", s.healthHandler)
+		r.Get("/network", s.networkStatusHandler)
+		r.Put("/network", s.networkSwitchHandler)
 		r.Get("/trading", s.tradingStatusHandler)
 		r.Put("/trading", s.tradingToggleHandler)
 		r.Get("/bootstrap", s.bootstrapHandler)
@@ -86,51 +158,59 @@ func (s *Server) Router() http.Handler {
 }
 
 func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 	defer cancel()
-	h, err := s.client.Health(ctx)
+	h, err := runtime.client.Health(ctx)
 	if err != nil {
 		h.Connected = false
 		h.Upstream = "error"
 		h.Backend = "ok"
 	}
-	h.AccountReady = s.cfg.AccountConfigured
-	h.TradingAvailable = s.tradingAvailable()
+	h.AccountReady = runtime.cfg.AccountConfigured
+	h.TradingAvailable = s.tradingAvailable(runtime)
 	h.TradingEnabled = s.tradingEnabled.Load()
-	h.Network = s.cfg.HLNetwork
+	h.Network = runtime.cfg.HLNetwork
 	h.Timestamp = time.Now().UnixMilli()
 	_ = writeJSON(w, http.StatusOK, h)
 }
 
 func (s *Server) tradingStatusHandler(w http.ResponseWriter, _ *http.Request) {
-	_ = writeJSON(w, http.StatusOK, s.tradingStatus())
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	_ = writeJSON(w, http.StatusOK, s.tradingStatus(s.current()))
 }
 
 func (s *Server) tradingToggleHandler(w http.ResponseWriter, r *http.Request) {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
 	var request TradingToggleRequest
 	if err := decodeJSONBody(w, r, &request); err != nil {
 		s.handleProblem(w, r, http.StatusBadRequest, "https://fakemex.local/problems/validation", "Invalid payload", err.Error(), "invalid_json", nil)
 		return
 	}
-	if request.Enabled && !s.tradingAvailable() {
-		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/trading", "Trading unavailable", "signed testnet trading is not enabled in the backend configuration", "trading_unavailable", nil)
+	runtime := s.current()
+	if request.Enabled && !s.tradingAvailable(runtime) {
+		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/trading", "Trading unavailable", "signed trading is not configured for the selected network", "trading_unavailable", nil)
 		return
 	}
 	s.tradingEnabled.Store(request.Enabled)
-	_ = writeJSON(w, http.StatusOK, s.tradingStatus())
+	_ = writeJSON(w, http.StatusOK, s.tradingStatus(runtime))
 }
 
-func (s *Server) tradingAvailable() bool {
-	return s.cfg.TradingAllowed && s.cfg.AccountConfigured
+func (s *Server) tradingAvailable(runtime *networkRuntime) bool {
+	return runtime.canTrade
 }
 
-func (s *Server) tradingStatus() TradingStatus {
-	return TradingStatus{Available: s.tradingAvailable(), Enabled: s.tradingEnabled.Load(), Network: s.cfg.HLNetwork}
+func (s *Server) tradingStatus(runtime *networkRuntime) TradingStatus {
+	return TradingStatus{Available: s.tradingAvailable(runtime), Enabled: s.tradingEnabled.Load(), Network: runtime.cfg.HLNetwork}
 }
 
-func (s *Server) requireTrading(w http.ResponseWriter, r *http.Request) bool {
-	if !s.tradingAvailable() {
-		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/trading", "Trading unavailable", "signed testnet trading is not enabled in the backend configuration", "trading_unavailable", nil)
+func (s *Server) requireTrading(w http.ResponseWriter, r *http.Request, runtime *networkRuntime) bool {
+	if !s.tradingAvailable(runtime) {
+		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/trading", "Trading unavailable", "signed trading is not configured for the selected network", "trading_unavailable", nil)
 		return false
 	}
 	if !s.tradingEnabled.Load() {
@@ -140,16 +220,81 @@ func (s *Server) requireTrading(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+func (s *Server) networkStatusHandler(w http.ResponseWriter, _ *http.Request) {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	_ = writeJSON(w, http.StatusOK, s.networkStatus(s.current()))
+}
+
+func (s *Server) networkSwitchHandler(w http.ResponseWriter, r *http.Request) {
+	var request NetworkSwitchRequest
+	if err := decodeJSONBody(w, r, &request); err != nil {
+		s.handleProblem(w, r, http.StatusBadRequest, "https://fakemex.local/problems/validation", "Invalid payload", err.Error(), "invalid_json", nil)
+		return
+	}
+	network := strings.ToLower(strings.TrimSpace(request.Network))
+	next, ok := s.networks[network]
+	if !ok || (network != config.NetworkTestnet && network != config.NetworkMainnet) {
+		s.handleProblem(w, r, http.StatusBadRequest, "https://fakemex.local/problems/validation", "Invalid network", "network must be testnet or mainnet", "validation", map[string]string{"network": "testnet|mainnet"})
+		return
+	}
+	if network == config.NetworkMainnet && !next.configured {
+		s.handleProblem(
+			w,
+			r,
+			http.StatusPreconditionFailed,
+			"https://fakemex.local/problems/network",
+			"Mainnet unavailable",
+			"mainnet requires complete HL_MAINNET_ACCOUNT_ADDRESS, HL_MAINNET_API_WALLET_ADDRESS, and HL_MAINNET_API_WALLET_PRIVATE_KEY configuration",
+			"network_unavailable",
+			nil,
+		)
+		return
+	}
+
+	// A network switch cannot race a signed action. Waiting for any in-flight
+	// action and disarming before the atomic swap keeps the signer/client pair
+	// consistent and requires explicit re-enablement on the selected network.
+	s.networkMux.Lock()
+	defer s.networkMux.Unlock()
+	previous := s.current()
+	s.tradingEnabled.Store(false)
+	s.active.Store(next)
+	if previous != next {
+		previous.stream.Reset()
+	}
+	_ = writeJSON(w, http.StatusOK, s.networkStatus(next))
+}
+
+func (s *Server) networkStatus(runtime *networkRuntime) NetworkStatus {
+	available := make([]string, 0, 2)
+	for _, network := range []string{config.NetworkTestnet, config.NetworkMainnet} {
+		candidate, ok := s.networks[network]
+		if ok && (network == config.NetworkTestnet || candidate.configured) {
+			available = append(available, network)
+		}
+	}
+	return NetworkStatus{
+		Network:           runtime.cfg.HLNetwork,
+		AvailableNetworks: available,
+		TradingAvailable:  s.tradingAvailable(runtime),
+		TradingEnabled:    s.tradingEnabled.Load(),
+	}
+}
+
 func (s *Server) marketsHandler(w http.ResponseWriter, r *http.Request) {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 	defer cancel()
-	markets, err := s.client.Markets(ctx)
+	markets, err := runtime.client.Markets(ctx)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/markets", "Market feed unavailable", err.Error(), "upstream_error", nil)
 		return
 	}
 	_ = markets
-	assetCtx, err := s.client.AssetContexts(ctx)
+	assetCtx, err := runtime.client.AssetContexts(ctx)
 	if err != nil {
 		s.logger.Warn("asset contexts unavailable", "error", err)
 	}
@@ -161,6 +306,9 @@ func (s *Server) marketsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) bootstrapHandler(w http.ResponseWriter, r *http.Request) {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
 	symbol := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("symbol")))
 	interval := strings.TrimSpace(r.URL.Query().Get("interval"))
 	if interval == "" {
@@ -180,25 +328,28 @@ func (s *Server) bootstrapHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
-	snapshot, err := s.stream.Snapshot(ctx, symbol, interval)
+	snapshot, err := runtime.stream.Snapshot(ctx, symbol, interval)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/bootstrap", "Bootstrap failed", err.Error(), "upstream_error", nil)
 		return
 	}
-	if s.cfg.AccountConfigured {
-		s.enrichSnapshotWithAccount(ctx, &snapshot)
+	if runtime.cfg.AccountConfigured {
+		s.enrichSnapshotWithAccount(ctx, &snapshot, runtime)
 	}
 	_ = writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (s *Server) accountHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AccountConfigured {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	if !runtime.cfg.AccountConfigured {
 		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/account", "Account not configured", "master account credentials are missing", "account_not_configured", map[string]string{"account": "missing"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
-	acc, err := s.client.AccountSnapshot(ctx, s.cfg.HLAccountAddress)
+	acc, err := runtime.client.AccountSnapshot(ctx, runtime.cfg.HLAccountAddress)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/account", "Account unavailable", err.Error(), "upstream_error", nil)
 		return
@@ -207,7 +358,10 @@ func (s *Server) accountHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ordersHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AccountConfigured {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	if !runtime.cfg.AccountConfigured {
 		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/account", "Account not configured", "master account credentials are missing", "account_not_configured", map[string]string{"account": "missing"})
 		return
 	}
@@ -221,7 +375,7 @@ func (s *Server) ordersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
-	res, err := s.client.Orders(ctx, s.cfg.HLAccountAddress, view)
+	res, err := runtime.client.Orders(ctx, runtime.cfg.HLAccountAddress, view)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/orders", "Orders unavailable", err.Error(), "upstream_error", nil)
 		return
@@ -230,13 +384,16 @@ func (s *Server) ordersHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) fillsHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AccountConfigured {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	if !runtime.cfg.AccountConfigured {
 		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/account", "Account not configured", "master account credentials are missing", "account_not_configured", map[string]string{"account": "missing"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
-	res, err := s.client.Fills(ctx, s.cfg.HLAccountAddress)
+	res, err := runtime.client.Fills(ctx, runtime.cfg.HLAccountAddress)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/fills", "Fills unavailable", err.Error(), "upstream_error", nil)
 		return
@@ -245,13 +402,16 @@ func (s *Server) fillsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) fundingHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AccountConfigured {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	if !runtime.cfg.AccountConfigured {
 		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/account", "Account not configured", "master account credentials are missing", "account_not_configured", map[string]string{"account": "missing"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
-	res, err := s.client.Funding(ctx, s.cfg.HLAccountAddress)
+	res, err := runtime.client.Funding(ctx, runtime.cfg.HLAccountAddress)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/funding", "Funding unavailable", err.Error(), "upstream_error", nil)
 		return
@@ -260,11 +420,14 @@ func (s *Server) fundingHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createOrderHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AccountConfigured {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	if !runtime.cfg.AccountConfigured {
 		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/account", "Account not configured", "master account credentials are missing", "account_not_configured", map[string]string{"account": "missing"})
 		return
 	}
-	if !s.requireTrading(w, r) {
+	if !s.requireTrading(w, r, runtime) {
 		return
 	}
 	defer r.Body.Close()
@@ -277,7 +440,7 @@ func (s *Server) createOrderHandler(w http.ResponseWriter, r *http.Request) {
 		s.handleProblem(w, r, http.StatusBadRequest, "https://fakemex.local/problems/validation", "Validation failed", err.Error(), "validation", nil)
 		return
 	}
-	market, err := s.marketBySymbol(r.Context(), req.Symbol)
+	market, err := marketBySymbol(r.Context(), runtime.client, req.Symbol)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadRequest, "https://fakemex.local/problems/validation", "Invalid symbol", err.Error(), "validation", map[string]string{"symbol": "invalid"})
 		return
@@ -288,7 +451,7 @@ func (s *Server) createOrderHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
-	resp, err := s.client.PlaceOrder(ctx, req)
+	resp, err := runtime.client.PlaceOrder(ctx, req)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/trading", "Write failed", err.Error(), "upstream_error", nil)
 		return
@@ -300,11 +463,14 @@ func (s *Server) createOrderHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) modifyOrderHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AccountConfigured {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	if !runtime.cfg.AccountConfigured {
 		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/account", "Account not configured", "master account credentials are missing", "account_not_configured", map[string]string{"account": "missing"})
 		return
 	}
-	if !s.requireTrading(w, r) {
+	if !s.requireTrading(w, r, runtime) {
 		return
 	}
 	requestID := chi.URLParam(r, "oid")
@@ -321,7 +487,7 @@ func (s *Server) modifyOrderHandler(w http.ResponseWriter, r *http.Request) {
 		s.handleProblem(w, r, http.StatusBadRequest, "https://fakemex.local/problems/validation", "Validation failed", err.Error(), "validation", nil)
 		return
 	}
-	market, err := s.marketBySymbol(r.Context(), req.Symbol)
+	market, err := marketBySymbol(r.Context(), runtime.client, req.Symbol)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadRequest, "https://fakemex.local/problems/validation", "Invalid symbol", err.Error(), "validation", map[string]string{"symbol": "invalid"})
 		return
@@ -332,7 +498,7 @@ func (s *Server) modifyOrderHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
-	resp, err := s.client.ModifyOrder(ctx, requestID, req)
+	resp, err := runtime.client.ModifyOrder(ctx, requestID, req)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/trading", "Modify failed", err.Error(), "upstream_error", nil)
 		return
@@ -344,11 +510,14 @@ func (s *Server) modifyOrderHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelOrderHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AccountConfigured {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	if !runtime.cfg.AccountConfigured {
 		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/account", "Account not configured", "master account credentials are missing", "account_not_configured", map[string]string{"account": "missing"})
 		return
 	}
-	if !s.requireTrading(w, r) {
+	if !s.requireTrading(w, r, runtime) {
 		return
 	}
 	requestID := chi.URLParam(r, "oid")
@@ -363,7 +532,7 @@ func (s *Server) cancelOrderHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
-	resp, err := s.client.CancelOrder(ctx, s.cfg.HLAccountAddress, symbol, requestID)
+	resp, err := runtime.client.CancelOrder(ctx, runtime.cfg.HLAccountAddress, symbol, requestID)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/trading", "Cancel failed", err.Error(), "upstream_error", nil)
 		return
@@ -375,17 +544,20 @@ func (s *Server) cancelOrderHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelAllOrdersHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AccountConfigured {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	if !runtime.cfg.AccountConfigured {
 		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/account", "Account not configured", "master account credentials are missing", "account_not_configured", map[string]string{"account": "missing"})
 		return
 	}
-	if !s.requireTrading(w, r) {
+	if !s.requireTrading(w, r, runtime) {
 		return
 	}
 	symbol := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("symbol")))
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
-	resp, err := s.client.CancelAllOrders(ctx, s.cfg.HLAccountAddress, symbol)
+	resp, err := runtime.client.CancelAllOrders(ctx, runtime.cfg.HLAccountAddress, symbol)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/trading", "Cancel failed", err.Error(), "upstream_error", nil)
 		return
@@ -397,11 +569,14 @@ func (s *Server) cancelAllOrdersHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) leverageHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AccountConfigured {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	if !runtime.cfg.AccountConfigured {
 		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/account", "Account not configured", "master account credentials are missing", "account_not_configured", map[string]string{"account": "missing"})
 		return
 	}
-	if !s.requireTrading(w, r) {
+	if !s.requireTrading(w, r, runtime) {
 		return
 	}
 	symbol := strings.ToUpper(strings.TrimSpace(chi.URLParam(r, "symbol")))
@@ -416,7 +591,7 @@ func (s *Server) leverageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
-	resp, err := s.client.SetLeverage(ctx, s.cfg.HLAccountAddress, symbol, req)
+	resp, err := runtime.client.SetLeverage(ctx, runtime.cfg.HLAccountAddress, symbol, req)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/trading", "Leverage failed", err.Error(), "upstream_error", nil)
 		return
@@ -428,11 +603,14 @@ func (s *Server) leverageHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) closePositionHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AccountConfigured {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	if !runtime.cfg.AccountConfigured {
 		s.handleProblem(w, r, http.StatusPreconditionFailed, "https://fakemex.local/problems/account", "Account not configured", "master account credentials are missing", "account_not_configured", map[string]string{"account": "missing"})
 		return
 	}
-	if !s.requireTrading(w, r) {
+	if !s.requireTrading(w, r, runtime) {
 		return
 	}
 	symbol := strings.ToUpper(strings.TrimSpace(chi.URLParam(r, "symbol")))
@@ -447,7 +625,7 @@ func (s *Server) closePositionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
-	resp, err := s.client.ClosePosition(ctx, s.cfg.HLAccountAddress, symbol, req)
+	resp, err := runtime.client.ClosePosition(ctx, runtime.cfg.HLAccountAddress, symbol, req)
 	if err != nil {
 		s.handleProblem(w, r, http.StatusBadGateway, "https://fakemex.local/problems/trading", "Close failed", err.Error(), "upstream_error", nil)
 		return
@@ -490,7 +668,7 @@ func (s *Server) streamHandler(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	sub, err := s.stream.Subscribe(ctx, symbol, interval)
+	sub, snapshot, err := s.openStreamSnapshot(ctx, symbol, interval)
 	if err != nil {
 		s.writeWSProblem(
 			conn,
@@ -504,41 +682,65 @@ func (s *Server) streamHandler(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	snapshot, err := s.stream.Snapshot(ctx, symbol, interval)
-	if err != nil {
-		s.writeWSProblem(
-			conn,
-			ContextRequestID(r),
-			http.StatusBadGateway,
-			"https://fakemex.local/problems/bootstrap",
-			"Bootstrap unavailable",
-			"snapshot unavailable",
-			map[string]string{"symbol": symbol},
-			"upstream_error",
-		)
+	defer sub.Close()
+	if err := conn.WriteJSON(StreamEnvelope[exchange.Bootstrap]{Type: "snapshot", Sequence: 1, Symbol: symbol, ServerTime: time.Now().UnixMilli(), Data: snapshot}); err != nil {
 		return
 	}
-	_ = conn.WriteJSON(StreamEnvelope[exchange.Bootstrap]{Type: "snapshot", Sequence: 1, Symbol: symbol, ServerTime: time.Now().UnixMilli(), Data: snapshot})
+	clientClosed := make(chan struct{})
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	})
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
+		defer close(clientClosed)
 		for {
-			select {
-			case <-ctx.Done():
+			if _, _, err := conn.ReadMessage(); err != nil {
 				return
-			case <-ticker.C:
-				_ = conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(2*time.Second))
 			}
 		}
 	}()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	seq := uint64(1)
-	for event := range sub.Events {
-		seq++
-		if event.Symbol == "" {
-			event.Symbol = symbol
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-clientClosed:
+			return
+		case <-ticker.C:
+			if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(2*time.Second)); err != nil {
+				return
+			}
+		case event, ok := <-sub.Events:
+			if !ok {
+				return
+			}
+			seq++
+			if event.Symbol == "" {
+				event.Symbol = symbol
+			}
+			if err := conn.WriteJSON(StreamEnvelope[any]{Type: string(event.Type), Symbol: event.Symbol, Sequence: seq, ServerTime: event.ServerTime, Data: event.Data}); err != nil {
+				return
+			}
 		}
-		_ = conn.WriteJSON(StreamEnvelope[any]{Type: string(event.Type), Symbol: event.Symbol, Sequence: seq, ServerTime: event.ServerTime, Data: event.Data})
 	}
+}
+
+func (s *Server) openStreamSnapshot(ctx context.Context, symbol, interval string) (stream.Subscription, exchange.Bootstrap, error) {
+	s.networkMux.RLock()
+	defer s.networkMux.RUnlock()
+	runtime := s.current()
+	sub, err := runtime.stream.Subscribe(ctx, symbol, interval)
+	if err != nil {
+		return stream.Subscription{}, exchange.Bootstrap{}, err
+	}
+	snapshot, err := runtime.stream.Snapshot(ctx, symbol, interval)
+	if err != nil {
+		sub.Close()
+		return stream.Subscription{}, exchange.Bootstrap{}, err
+	}
+	return sub, snapshot, nil
 }
 
 func (s *Server) handleProblem(w http.ResponseWriter, r *http.Request, status int, typ, title, detail, code string, fields map[string]string) {
@@ -580,38 +782,38 @@ func (s *Server) writeWSProblem(
 	})
 }
 
-func (s *Server) enrichSnapshotWithAccount(ctx context.Context, snapshot *exchange.Bootstrap) {
-	if snapshot == nil || !s.cfg.AccountConfigured {
+func (s *Server) enrichSnapshotWithAccount(ctx context.Context, snapshot *exchange.Bootstrap, runtime *networkRuntime) {
+	if snapshot == nil || !runtime.cfg.AccountConfigured {
 		return
 	}
-	acc, err := s.client.AccountSnapshot(ctx, s.cfg.HLAccountAddress)
+	acc, err := runtime.client.AccountSnapshot(ctx, runtime.cfg.HLAccountAddress)
 	if err != nil {
 		s.logger.Warn("account snapshot unavailable", "error", err)
 	} else {
 		snapshot.Account = &acc
 		snapshot.Assets = ensureSlice[exchange.Asset](acc.Assets)
 	}
-	open, err := s.client.Orders(ctx, s.cfg.HLAccountAddress, "open")
+	open, err := runtime.client.Orders(ctx, runtime.cfg.HLAccountAddress, "open")
 	if err != nil {
 		s.logger.Warn("open orders unavailable", "error", err)
 		open = make([]exchange.Order, 0)
 	}
-	trigger, err := s.client.Orders(ctx, s.cfg.HLAccountAddress, "trigger")
+	trigger, err := runtime.client.Orders(ctx, runtime.cfg.HLAccountAddress, "trigger")
 	if err != nil {
 		s.logger.Warn("trigger orders unavailable", "error", err)
 		trigger = make([]exchange.Order, 0)
 	}
-	history, err := s.client.Orders(ctx, s.cfg.HLAccountAddress, "history")
+	history, err := runtime.client.Orders(ctx, runtime.cfg.HLAccountAddress, "history")
 	if err != nil {
 		s.logger.Warn("order history unavailable", "error", err)
 		history = make([]exchange.Order, 0)
 	}
-	fills, err := s.client.Fills(ctx, s.cfg.HLAccountAddress)
+	fills, err := runtime.client.Fills(ctx, runtime.cfg.HLAccountAddress)
 	if err != nil {
 		s.logger.Warn("fills unavailable", "error", err)
 		fills = make([]exchange.Fill, 0)
 	}
-	funding, err := s.client.Funding(ctx, s.cfg.HLAccountAddress)
+	funding, err := runtime.client.Funding(ctx, runtime.cfg.HLAccountAddress)
 	if err != nil {
 		s.logger.Warn("funding unavailable", "error", err)
 		funding = make([]exchange.FundingEvent, 0)
@@ -804,8 +1006,8 @@ func validateSlippage(value string) error {
 	return nil
 }
 
-func (s *Server) marketBySymbol(ctx context.Context, symbol string) (*exchange.Market, error) {
-	markets, err := s.client.Markets(ctx)
+func marketBySymbol(ctx context.Context, client exchange.ExchangeClient, symbol string) (*exchange.Market, error) {
+	markets, err := client.Markets(ctx)
 	if err != nil {
 		return nil, err
 	}

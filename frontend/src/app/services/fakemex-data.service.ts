@@ -1,15 +1,7 @@
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Injectable, PLATFORM_ID, computed, inject, signal } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
-import {
-  catchError,
-  Observable,
-  interval,
-  of,
-  Subject,
-  switchMap,
-  tap,
-} from 'rxjs';
+import { catchError, Observable, interval, of, Subject, switchMap, tap } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
 import {
   Asset,
@@ -24,6 +16,8 @@ import {
   MarketMeta,
   MarketSnapshot,
   ModifyOrderRequest,
+  NetworkName,
+  NetworkStatus,
   Order,
   OrderWriteResult,
   OrderRequest,
@@ -72,11 +66,23 @@ export class FakeMexDataService {
   readonly error = signal<string | null>(null);
   readonly isDemo = signal(false);
   readonly health = signal<Health>(demoHealth);
-  readonly tradingStatus = signal<TradingStatus>({ available: false, enabled: false, network: 'testnet' });
+  readonly tradingStatus = signal<TradingStatus>({
+    available: false,
+    enabled: false,
+    network: 'testnet',
+  });
+  readonly networkStatus = signal<NetworkStatus>({
+    network: 'testnet',
+    availableNetworks: ['testnet', 'mainnet'],
+    tradingAvailable: false,
+    tradingEnabled: false,
+  });
   readonly refreshIntervalMs = signal(DEFAULT_REFRESH_INTERVAL_MS);
   readonly hasConnection = computed(() => this.connection().phase !== 'offline');
 
-  readonly selectedMarket = computed(() => this.markets().find((item) => item.symbol === this.selectedSymbol()) ?? this.market());
+  readonly selectedMarket = computed(
+    () => this.markets().find((item) => item.symbol === this.selectedSymbol()) ?? this.market(),
+  );
   readonly selectedLeverage = computed(() => this.market()?.leverage.currentLeverage ?? 1);
   readonly selectedMode = computed(() => this.leverageMode());
 
@@ -130,7 +136,9 @@ export class FakeMexDataService {
     this.loading.set(true);
     this.error.set(null);
     this.http
-      .get<MarketSnapshot>(`${this.apiBase}/bootstrap?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(intervalValue)}`)
+      .get<MarketSnapshot>(
+        `${this.apiBase}/bootstrap?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(intervalValue)}`,
+      )
       .pipe(
         catchError((error) => {
           const backendError = this.readMessage(error);
@@ -151,7 +159,10 @@ export class FakeMexDataService {
       return of(this.disabledWriteResponse());
     }
     return this.http
-      .put<OrderWriteResult>(`${this.apiBase}/positions/${encodeURIComponent(this.selectedSymbol())}/leverage`, payload)
+      .put<OrderWriteResult>(
+        `${this.apiBase}/positions/${encodeURIComponent(this.selectedSymbol())}/leverage`,
+        payload,
+      )
       .pipe(
         tap((result) => {
           if (result.status === 'ok') {
@@ -162,13 +173,16 @@ export class FakeMexDataService {
       );
   }
 
-  closePosition(payload: ClosePositionRequest): Observable<OrderWriteResult> {
+  closePosition(
+    payload: ClosePositionRequest,
+    symbol = this.selectedSymbol(),
+  ): Observable<OrderWriteResult> {
     if (this.isDemo()) {
       return of(this.disabledWriteResponse());
     }
     return this.http
       .post<OrderWriteResult>(
-        `${this.apiBase}/positions/${encodeURIComponent(this.selectedSymbol())}/close`,
+        `${this.apiBase}/positions/${encodeURIComponent(symbol)}/close`,
         payload,
       )
       .pipe(catchError((error) => of(this.errorResponse(error))));
@@ -202,7 +216,9 @@ export class FakeMexDataService {
       return of(this.disabledWriteResponse());
     }
     return this.http
-      .delete<OrderWriteResult>(`${this.apiBase}/orders/${encodeURIComponent(oid)}?symbol=${encodeURIComponent(this.selectedSymbol())}`)
+      .delete<OrderWriteResult>(
+        `${this.apiBase}/orders/${encodeURIComponent(oid)}?symbol=${encodeURIComponent(this.selectedSymbol())}`,
+      )
       .pipe(catchError((error) => of(this.errorResponse(error))));
   }
 
@@ -218,14 +234,33 @@ export class FakeMexDataService {
   loadTradingStatus(): void {
     this.http
       .get<TradingStatus>(`${this.apiBase}/trading`)
-      .pipe(catchError(() => of({ available: false, enabled: false, network: 'testnet' } satisfies TradingStatus)))
-      .subscribe((status) => this.tradingStatus.set(status));
+      .pipe(catchError(() => of(this.tradingStatus())))
+      .subscribe((status) => this.applyTradingStatus(status));
   }
 
   setTradingEnabled(enabled: boolean): Observable<TradingStatus> {
     return this.http
       .put<TradingStatus>(`${this.apiBase}/trading`, { enabled })
-      .pipe(tap((status) => this.tradingStatus.set(status)));
+      .pipe(tap((status) => this.applyTradingStatus(status)));
+  }
+
+  setNetwork(network: NetworkName): Observable<NetworkStatus> {
+    return this.http.put<NetworkStatus>(`${this.apiBase}/network`, { network }).pipe(
+      tap((status) => {
+        this.networkStatus.set(status);
+        this.tradingStatus.set({
+          available: status.tradingAvailable,
+          enabled: status.tradingEnabled,
+          network: status.network,
+        });
+        this.sequenceByType.clear();
+        this.bootstrap(this.selectedSymbol(), this.interval());
+      }),
+    );
+  }
+
+  errorMessage(error: unknown): string {
+    return this.readMessage(error);
   }
 
   destroy() {
@@ -320,7 +355,9 @@ export class FakeMexDataService {
 
   private loadRefreshInterval() {
     if (!isPlatformBrowser(this.platformId)) return DEFAULT_REFRESH_INTERVAL_MS;
-    const raw = localStorage.getItem(LOCAL_STORAGE_REFRESH_INTERVAL_KEY) ?? LOCAL_STORAGE_REFRESH_INTERVAL_FALLBACK;
+    const raw =
+      localStorage.getItem(LOCAL_STORAGE_REFRESH_INTERVAL_KEY) ??
+      LOCAL_STORAGE_REFRESH_INTERVAL_FALLBACK;
     const parsed = raw ? Number.parseInt(raw, 10) : DEFAULT_REFRESH_INTERVAL_MS;
     return clampRefreshInterval(parsed);
   }
@@ -421,7 +458,9 @@ export class FakeMexDataService {
         this.fills.update((fills) => [...(envelope.data as Fill[]), ...fills].slice(0, 100));
         break;
       case 'funding':
-        this.funding.update((funding) => [...(envelope.data as Funding[]), ...funding].slice(0, 50));
+        this.funding.update((funding) =>
+          [...(envelope.data as Funding[]), ...funding].slice(0, 50),
+        );
         break;
       case 'connection':
         this.connection.set({
@@ -430,7 +469,9 @@ export class FakeMexDataService {
         });
         break;
       case 'error':
-        this.error.set((envelope.data as { detail?: string; title?: string }).detail || 'Stream error');
+        this.error.set(
+          (envelope.data as { detail?: string; title?: string }).detail || 'Stream error',
+        );
         this.connection.set({ phase: 'offline', detail: 'Stream error' });
         break;
     }
@@ -451,17 +492,32 @@ export class FakeMexDataService {
       .pipe(
         takeUntil(this.destroy$),
         switchMap(() =>
-          this.http.get<Health>(`${this.apiBase}/health`).pipe(catchError(() => of(demoHealth))),
+          this.http.get<Health>(`${this.apiBase}/health`).pipe(catchError(() => of(null))),
         ),
       )
       .subscribe((health) => {
+        if (!health) return;
+        const networkChanged = health.network !== this.networkStatus().network;
         this.health.set(health);
-        this.tradingStatus.set({
+        this.applyTradingStatus({
           available: health.tradingAvailable,
           enabled: health.tradingEnabled,
           network: health.network,
         });
+        if (networkChanged && (health.network === 'testnet' || health.network === 'mainnet')) {
+          this.bootstrap(this.selectedSymbol(), this.interval());
+        }
       });
+  }
+
+  private applyTradingStatus(status: TradingStatus): void {
+    this.tradingStatus.set(status);
+    this.networkStatus.update((current) => ({
+      ...current,
+      network: status.network,
+      tradingAvailable: status.available,
+      tradingEnabled: status.enabled,
+    }));
   }
 
   private findMarket(symbol: string): MarketMeta {
@@ -511,7 +567,9 @@ type AccountUpdate = {
 };
 
 function mergeMarketContext(base: MarketMeta, partial: Partial<MarketMeta>): MarketMeta {
-  const incoming = partial as Partial<MarketMeta & { active?: boolean; leverage?: Partial<MarketMeta['leverage']> }>;
+  const incoming = partial as Partial<
+    MarketMeta & { active?: boolean; leverage?: Partial<MarketMeta['leverage']> }
+  >;
   const text = (value: unknown): string | undefined =>
     typeof value === 'string' && value.trim().length > 0 ? value : undefined;
   const positiveNumber = (value: unknown): value is number =>
@@ -533,7 +591,8 @@ function mergeMarketContext(base: MarketMeta, partial: Partial<MarketMeta>): Mar
 
   const currentActive = (base as { active?: boolean }).active;
   const incomingActive = (incoming as { active?: boolean }).active;
-  const nextActive = incomingActive === undefined ? currentActive : incomingActive === true ? true : currentActive;
+  const nextActive =
+    incomingActive === undefined ? currentActive : incomingActive === true ? true : currentActive;
 
   return {
     ...base,
@@ -544,7 +603,9 @@ function mergeMarketContext(base: MarketMeta, partial: Partial<MarketMeta>): Mar
     markPx: text(incoming.markPx) ?? base.markPx,
     funding: text(incoming.funding) ?? base.funding,
     baseDecimals: positiveNumber(incoming.baseDecimals) ? incoming.baseDecimals : base.baseDecimals,
-    quoteDecimals: positiveNumber(incoming.quoteDecimals) ? incoming.quoteDecimals : base.quoteDecimals,
+    quoteDecimals: positiveNumber(incoming.quoteDecimals)
+      ? incoming.quoteDecimals
+      : base.quoteDecimals,
     leverage: nextLeverage,
     ...(currentActive === undefined && incomingActive === undefined
       ? {}
@@ -564,6 +625,9 @@ function clampRefreshInterval(ms: number): number {
   if (!Number.isFinite(ms)) {
     return DEFAULT_REFRESH_INTERVAL_MS;
   }
-  const safeStep = Math.max(1, Math.round(ms / REFRESH_INTERVAL_STEP_MS) * REFRESH_INTERVAL_STEP_MS);
+  const safeStep = Math.max(
+    1,
+    Math.round(ms / REFRESH_INTERVAL_STEP_MS) * REFRESH_INTERVAL_STEP_MS,
+  );
   return Math.max(MIN_REFRESH_INTERVAL_MS, Math.min(MAX_REFRESH_INTERVAL_MS, safeStep));
 }

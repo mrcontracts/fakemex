@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common';
-import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
 import { sortTableRows, TableSortDirection } from '../table-sort';
 
 export type SimpleTableCellClass = (
@@ -7,6 +7,8 @@ export type SimpleTableCellClass = (
   row: readonly unknown[],
   columnIndex: number,
 ) => string;
+
+export type SimpleTableRowText = string | ((row: readonly unknown[]) => string);
 
 @Component({
   selector: 'app-simple-table',
@@ -27,16 +29,21 @@ export type SimpleTableCellClass = (
                   [attr.aria-label]="sortLabel(header, columnIndex)"
                 >
                   <span>{{ header }}</span>
-                  <span class="sort-indicator" aria-hidden="true">{{ sortIndicator(columnIndex) }}</span>
+                  <span class="sort-indicator" aria-hidden="true">{{
+                    sortIndicator(columnIndex)
+                  }}</span>
                 </button>
               </th>
+            }
+            @if (rowActionLabel) {
+              <th class="action-header" scope="col">{{ actionHeader }}</th>
             }
           </tr>
         </thead>
         <tbody>
           @if (rows.length === 0) {
             <tr>
-              <td [attr.colspan]="headers.length" class="empty">
+              <td [attr.colspan]="headers.length + (rowActionLabel ? 1 : 0)" class="empty">
                 No data yet
               </td>
             </tr>
@@ -45,6 +52,19 @@ export type SimpleTableCellClass = (
               <tr>
                 @for (cell of row; track $index; let columnIndex = $index) {
                   <td [ngClass]="resolveCellClass(cell, row, columnIndex)">{{ cell }}</td>
+                }
+                @if (rowActionLabel) {
+                  <td class="action-cell">
+                    <button
+                      type="button"
+                      class="row-action"
+                      [disabled]="resolveRowActionDisabled(row)"
+                      [attr.aria-label]="resolveRowActionAriaLabel(row)"
+                      (click)="rowAction.emit(row)"
+                    >
+                      {{ resolveRowActionLabel(row) }}
+                    </button>
+                  </td>
                 }
               </tr>
             }
@@ -81,7 +101,11 @@ export type SimpleTableCellClass = (
       th {
         position: sticky;
         top: 0;
-        background: color-mix(in srgb, var(--fakemex-panel-header) 70%, var(--fakemex-shell-bg) 30%);
+        background: color-mix(
+          in srgb,
+          var(--fakemex-panel-header) 70%,
+          var(--fakemex-shell-bg) 30%
+        );
         z-index: 1;
         color: var(--fakemex-muted);
         text-transform: uppercase;
@@ -124,6 +148,11 @@ export type SimpleTableCellClass = (
         justify-content: flex-start;
       }
 
+      th.action-header,
+      td.action-cell {
+        text-align: center;
+      }
+
       tbody td {
         font-weight: 700;
       }
@@ -143,6 +172,32 @@ export type SimpleTableCellClass = (
       td.cell-negative {
         color: var(--fakemex-sell);
       }
+
+      .row-action {
+        border: 1px solid color-mix(in srgb, var(--fakemex-sell) 60%, var(--fakemex-border) 40%);
+        border-radius: var(--fakemex-radius);
+        padding: 0.22rem 0.5rem;
+        color: var(--fakemex-sell);
+        background: color-mix(in srgb, var(--fakemex-sell) 10%, transparent);
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .row-action:hover:not(:disabled),
+      .row-action:focus-visible {
+        background: color-mix(in srgb, var(--fakemex-sell) 20%, transparent);
+      }
+
+      .row-action:focus-visible {
+        outline: 2px solid var(--fakemex-sell);
+        outline-offset: 2px;
+      }
+
+      .row-action:disabled {
+        cursor: wait;
+        opacity: 0.55;
+      }
     `,
   ],
 })
@@ -150,6 +205,11 @@ export class SimpleTableComponent {
   @Input() headers: string[] = [];
   @Input() rows: unknown[][] = [];
   @Input() cellClass?: SimpleTableCellClass;
+  @Input() actionHeader = 'Action';
+  @Input() rowActionLabel?: SimpleTableRowText;
+  @Input() rowActionAriaLabel?: SimpleTableRowText;
+  @Input() rowActionDisabled?: (row: readonly unknown[]) => boolean;
+  @Output() rowAction = new EventEmitter<readonly unknown[]>();
   sortColumnIndex: number | null = null;
   sortDirection: TableSortDirection = 'asc';
 
@@ -184,5 +244,22 @@ export class SimpleTableComponent {
 
   resolveCellClass(cell: unknown, row: readonly unknown[], columnIndex: number): string {
     return this.cellClass?.(cell, row, columnIndex) ?? '';
+  }
+
+  resolveRowActionLabel(row: readonly unknown[]): string {
+    return this.resolveRowText(this.rowActionLabel, row);
+  }
+
+  resolveRowActionAriaLabel(row: readonly unknown[]): string {
+    return this.resolveRowText(this.rowActionAriaLabel ?? this.rowActionLabel, row);
+  }
+
+  resolveRowActionDisabled(row: readonly unknown[]): boolean {
+    return this.rowActionDisabled?.(row) ?? false;
+  }
+
+  private resolveRowText(value: SimpleTableRowText | undefined, row: readonly unknown[]): string {
+    if (!value) return '';
+    return typeof value === 'function' ? value(row) : value;
   }
 }

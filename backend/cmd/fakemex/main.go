@@ -43,27 +43,51 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
 
-	var client exchange.ExchangeClient
-	if cfg.CanTrade() {
-		client, err = exchange.NewTradingClient(
-			cfg.HLAPIURL,
-			cfg.HLWsURL,
-			cfg.HLAccountAddress,
-			cfg.HLAPIWalletAddress,
-			cfg.HLAPIWalletPrivateKey,
-			logger,
-		)
-		if err != nil {
-			logger.Error("failed to initialize signed trading", "error", err)
+	bindings := make(map[string]backendapi.NetworkBinding, len(cfg.ConfiguredNetworks()))
+	for _, network := range cfg.ConfiguredNetworks() {
+		profile, ok := cfg.ForNetwork(network)
+		if !ok {
+			logger.Error("network configuration disappeared", "network", network)
 			os.Exit(1)
 		}
-	} else {
-		client = exchange.NewSafeClient(cfg.HLAPIURL, cfg.HLWsURL, cfg.HLAccountAddress, logger)
+
+		var client exchange.ExchangeClient
+		configured := profile.HasTradingCredentials()
+		tradingAvailable := profile.CanTrade()
+		if tradingAvailable {
+			client, err = exchange.NewTradingClient(
+				profile.HLAPIURL,
+				profile.HLWsURL,
+				profile.HLAccountAddress,
+				profile.HLAPIWalletAddress,
+				profile.HLAPIWalletPrivateKey,
+				network == config.NetworkMainnet,
+				logger,
+			)
+			if err != nil {
+				logger.Error("failed to initialize signed trading", "network", network, "error", err)
+				os.Exit(1)
+			}
+		} else {
+			client = exchange.NewSafeClient(profile.HLAPIURL, profile.HLWsURL, profile.HLAccountAddress, logger)
+		}
+		// Each client retains only its parsed signing key. The HTTP runtime gets
+		// network metadata but no plaintext private-key copy.
+		profile.HLAPIWalletPrivateKey = ""
+		bindings[network] = backendapi.NetworkBinding{
+			Config:           profile,
+			Client:           client,
+			Configured:       configured,
+			TradingAvailable: tradingAvailable,
+		}
 	}
-	// The exchange client retains only the parsed signing key. Avoid keeping a
-	// second plaintext copy in the server configuration.
-	cfg.HLAPIWalletPrivateKey = ""
-	router := backendapi.NewServer(cfg, client, logger).Router()
+	cfg = cfg.WithoutPrivateKeys()
+	server, err := backendapi.NewNetworkServer(cfg, bindings, config.NetworkTestnet, logger)
+	if err != nil {
+		logger.Error("failed to initialize network runtime", "error", err)
+		os.Exit(1)
+	}
+	router := server.Router()
 
 	srv := &http.Server{
 		Addr:              cfg.ServerAddr,

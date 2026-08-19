@@ -48,7 +48,10 @@ test('theme search accepts Catppuccin Mocha misspelling and persists', async ({ 
   expect(persistedTheme).toBe('catppuccin-mocha');
 
   const shellBg = await page.evaluate(() =>
-    getComputedStyle(document.documentElement).getPropertyValue('--fakemex-shell-bg').trim().toLowerCase(),
+    getComputedStyle(document.documentElement)
+      .getPropertyValue('--fakemex-shell-bg')
+      .trim()
+      .toLowerCase(),
   );
   expect(shellBg).toBe('#1e1e2e');
 });
@@ -57,7 +60,9 @@ test('shows instrument selector and chart panel in desktop mode', async ({ page 
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
   await expect(page.getByLabel('Instrument')).toBeVisible();
-  await expect(page.locator('.toolbar-field .mat-mdc-select-value-text')).toContainText('BTC / USD');
+  await expect(page.locator('.toolbar-field .mat-mdc-select-value-text')).toContainText(
+    'BTC / USD',
+  );
   await expect(page.locator('.grid-stack')).toBeVisible();
   await expect(page.locator('.grid-stack-item')).toHaveCount(14);
 });
@@ -110,6 +115,52 @@ test('styles position symbols, sides, and PnL by meaning', async ({ page }) => {
   await expect(pnl).toHaveCSS('color', pnlValue > 0 ? colors.buy : colors.sell);
 });
 
+test('renders the selected position on the chart and closes the table row symbol', async ({
+  page,
+}) => {
+  let closePath = '';
+  let closePayload: unknown;
+  await page.route('**/api/v1/bootstrap**', async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(demoSnapshot) });
+  });
+  await page.route('**/api/v1/trading', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ available: true, enabled: true, network: 'testnet' }),
+    });
+  });
+  await page.route('**/api/v1/positions/*/close', async (route) => {
+    closePath = new URL(route.request().url()).pathname;
+    closePayload = route.request().postDataJSON();
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        requestId: 'e2e-close',
+        status: 'ok',
+        filled: '0.35',
+        averagePrice: '62480.10',
+      }),
+    });
+  });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/');
+
+  const chart = page.locator('.grid-stack-item[gs-id="chart"]');
+  await expect(chart.locator('.position-pill')).toContainText('BUY 0.35 @ 61234.12');
+  await expect(chart.locator('.position-pill .pnl-positive')).toHaveText('419.42');
+
+  const positions = page.locator('.grid-stack-item[gs-id="positions"]');
+  await expect(positions.getByRole('columnheader', { name: 'Action' })).toBeVisible();
+  await positions.getByRole('button', { name: 'Close BTC position' }).click();
+
+  await expect.poll(() => closePath).toBe('/api/v1/positions/BTC/close');
+  expect(closePayload).toEqual({ percent: 100, kind: 'market' });
+  await expect(page.locator('.trade-submitted')).toContainText(
+    'Position close submitted for BTC at 62480.10',
+  );
+});
+
 test('sorts table columns from their headers and uses bold data rows', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.route('**/api/v1/bootstrap**', async (route) => {
@@ -123,15 +174,19 @@ test('sorts table columns from their headers and uses bold data rows', async ({ 
 
   const prices = fills.locator('tbody tr td:nth-child(4)');
   await expect(prices.nth(1)).toBeVisible();
-  const ascendingPrices = (await prices.allTextContents()).map((value) => Number(value.replace(/,/g, '')));
+  const ascendingPrices = (await prices.allTextContents()).map((value) =>
+    Number(value.replace(/,/g, '')),
+  );
   expect(ascendingPrices.length).toBeGreaterThan(1);
   expect(ascendingPrices).toEqual([...ascendingPrices].sort((left, right) => left - right));
   await expect(prices.nth(0)).toHaveCSS('font-weight', '700');
 
   await fills.getByRole('button', { name: 'Sort Px descending' }).click();
-  await expect.poll(async () =>
-    (await prices.allTextContents()).map((value) => Number(value.replace(/,/g, ''))),
-  ).toEqual([...ascendingPrices].sort((left, right) => right - left));
+  await expect
+    .poll(async () =>
+      (await prices.allTextContents()).map((value) => Number(value.replace(/,/g, ''))),
+    )
+    .toEqual([...ascendingPrices].sort((left, right) => right - left));
 
   const orderBook = page.locator('.grid-stack-item[gs-id="book"]');
   await orderBook.getByRole('button', { name: 'Sort Size ascending' }).click();
@@ -140,10 +195,14 @@ test('sorts table columns from their headers and uses bold data rows', async ({ 
   const expectedSizes = (await sizes.allTextContents())
     .map((value) => Number(value.replace(/,/g, '')))
     .sort((left, right) => left - right);
-  await expect.poll(async () =>
-    (await sizes.allTextContents()).map((value) => Number(value.replace(/,/g, ''))),
-  ).toEqual(expectedSizes);
-  const ascendingSizes = (await sizes.allTextContents()).map((value) => Number(value.replace(/,/g, '')));
+  await expect
+    .poll(async () =>
+      (await sizes.allTextContents()).map((value) => Number(value.replace(/,/g, ''))),
+    )
+    .toEqual(expectedSizes);
+  const ascendingSizes = (await sizes.allTextContents()).map((value) =>
+    Number(value.replace(/,/g, '')),
+  );
   expect(ascendingSizes.length).toBeGreaterThan(1);
   expect(ascendingSizes).toEqual([...ascendingSizes].sort((left, right) => left - right));
   await expect(sizes.first()).toHaveCSS('font-weight', '700');
@@ -207,23 +266,133 @@ test('warns and does not send an order while trading is disabled', async ({ page
   expect(orderPosts).toBe(0);
 });
 
-test('shows margin mode badge beside stream status and theme Apply aligns with strip controls', async ({ page }) => {
+test('switches to mainnet through the backend and visibly disarms trading', async ({ page }) => {
+  await page.route('**/api/v1/bootstrap**', async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(demoSnapshot) });
+  });
+  await page.route('**/api/v1/trading', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ available: true, enabled: true, network: 'testnet' }),
+    });
+  });
+  await page.route('**/api/v1/network', async (route) => {
+    expect(route.request().method()).toBe('PUT');
+    expect(route.request().postDataJSON()).toEqual({ network: 'mainnet' });
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        network: 'mainnet',
+        availableNetworks: ['testnet', 'mainnet'],
+        tradingAvailable: true,
+        tradingEnabled: false,
+      }),
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.getByLabel('Enable Mainnet')).toBeVisible();
+  await expect(page.locator('.network-status-badge')).toHaveText('TESTNET');
+  await expect(page.getByLabel('Disable trading')).toBeVisible();
+  const themeColors = await page.evaluate(() => {
+    const resolve = (token: string) => {
+      const probe = document.createElement('span');
+      probe.style.color = getComputedStyle(document.documentElement).getPropertyValue(token);
+      document.body.appendChild(probe);
+      const value = getComputedStyle(probe).color;
+      probe.remove();
+      return value;
+    };
+    return {
+      text: resolve('--fakemex-text'),
+      buy: resolve('--fakemex-buy'),
+      sell: resolve('--fakemex-sell'),
+    };
+  });
+  await expect(page.locator('.network-toggle .mdc-label')).toHaveCSS('color', themeColors.text);
+  await expect(page.locator('.trading-toggle .mdc-label')).toHaveCSS('color', themeColors.text);
+  await expect(page.locator('.trading-toggle .mdc-switch__icon--on')).toHaveCSS(
+    'fill',
+    themeColors.buy,
+  );
+  await page.getByLabel('Enable Mainnet').click();
+
+  await expect(page.getByLabel('Disable Mainnet')).toBeVisible();
+  await expect(page.locator('.network-status-badge')).toHaveText('MAINNET');
+  await expect(page.locator('.network-toggle .mdc-label')).toHaveCSS('color', themeColors.sell);
+  await expect(page.locator('.network-toggle .mdc-switch__icon--on')).toHaveCSS(
+    'fill',
+    themeColors.buy,
+  );
+  await expect(page.getByLabel('Enable trading')).toBeVisible();
+  await expect(page.getByText(/MAINNET selected.*Trading was disabled/)).toBeVisible();
+});
+
+test('rejects mainnet when its signed local configuration is incomplete', async ({ page }) => {
+  await page.route('**/api/v1/bootstrap**', async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(demoSnapshot) });
+  });
+  await page.route('**/api/v1/trading', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ available: true, enabled: false, network: 'testnet' }),
+    });
+  });
+  await page.route('**/api/v1/network', async (route) => {
+    await route.fulfill({
+      status: 412,
+      contentType: 'application/problem+json',
+      body: JSON.stringify({
+        type: 'https://fakemex.local/problems/network',
+        title: 'Mainnet unavailable',
+        status: 412,
+        detail:
+          'mainnet requires complete HL_MAINNET_ACCOUNT_ADDRESS, HL_MAINNET_API_WALLET_ADDRESS, and HL_MAINNET_API_WALLET_PRIVATE_KEY configuration',
+        code: 'network_unavailable',
+      }),
+    });
+  });
+
+  await page.goto('/');
+  await page.getByLabel('Enable Mainnet').click();
+
+  await expect(
+    page.getByText(/mainnet requires complete HL_MAINNET_ACCOUNT_ADDRESS/),
+  ).toBeVisible();
+  await expect(page.getByLabel('Enable Mainnet')).toBeVisible();
+  await expect(page.locator('.network-status-badge')).toHaveText('TESTNET');
+});
+
+test('shows margin mode badge beside stream status and theme Apply aligns with strip controls', async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
 
   const status = page.locator('.toolbar .status-inline').first();
-  const marginBadge = page.locator('.toolbar .margin-mode-badge');
+  const networkBadge = page.locator('.toolbar .network-status-badge');
+  const marginBadge = page.locator('.toolbar .margin-mode-badge:not(.network-status-badge)');
   await expect(status).toBeVisible();
+  await expect(networkBadge).toBeVisible();
   await expect(marginBadge).toBeVisible();
+  await expect(networkBadge).toHaveText(/\b(TESTNET|MAINNET)\b/);
   await expect(marginBadge).toHaveText(/\b(CROSS|ISOLATED)\b/);
-  await expect(marginBadge).toBeVisible();
-  await expect(page.locator('.toolbar .status-inline + .margin-mode-badge')).toHaveCount(1);
+  await expect(page.locator('.toolbar .status.status-inline + .network-status-badge')).toHaveCount(
+    1,
+  );
+  await expect(page.locator('.toolbar .network-status-badge + .margin-mode-badge')).toHaveCount(1);
   const statusBox = await status.boundingBox();
+  const networkBox = await networkBadge.boundingBox();
   const badgeBox = await marginBadge.boundingBox();
   expect(statusBox).not.toBeNull();
+  expect(networkBox).not.toBeNull();
   expect(badgeBox).not.toBeNull();
-  expect(badgeBox!.x).toBeGreaterThan(statusBox!.x);
-  expect(Math.abs((badgeBox!.y + badgeBox!.height / 2) - (statusBox!.y + statusBox!.height / 2))).toBeLessThan(8);
+  expect(networkBox!.x).toBeGreaterThan(statusBox!.x);
+  expect(badgeBox!.x).toBeGreaterThan(networkBox!.x);
+  expect(
+    Math.abs(badgeBox!.y + badgeBox!.height / 2 - (statusBox!.y + statusBox!.height / 2)),
+  ).toBeLessThan(8);
+  expect(await networkBadge.getAttribute('aria-label')).toMatch(/Network (testnet|mainnet)/);
   expect(await marginBadge.getAttribute('aria-label')).toMatch(/Margin mode (CROSS|ISOLATED)/);
 
   const presetControl = page.locator('.control-strip .strip-control').nth(0);
@@ -242,7 +411,9 @@ test('shows margin mode badge beside stream status and theme Apply aligns with s
   expect(Math.abs(applyBox!.width - presetBox!.width)).toBeLessThanOrEqual(30);
 });
 
-test('rectangular elements use unified radius while circular controls stay circular', async ({ page }) => {
+test('rectangular elements use unified radius while circular controls stay circular', async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
 
@@ -350,9 +521,15 @@ test('captures dense viewport and chart sanity for full desktop terminal', async
   await expect(page.locator('app-depth-chart .depth-root')).toBeVisible();
   await expect(depthCanvas).toBeVisible();
 
-  const headerStatus = (await page.locator('.toolbar .status.status-inline').innerText()).trim().toLowerCase();
-  const toastText = (await page.locator('.connection-toast > span').nth(1).innerText()).trim().toLowerCase();
-  const chartStatus = (await page.locator('app-market-chart .status-pill').first().innerText()).trim().toLowerCase();
+  const headerStatus = (await page.locator('.toolbar .status.status-inline').innerText())
+    .trim()
+    .toLowerCase();
+  const toastText = (await page.locator('.connection-toast > span').nth(1).innerText())
+    .trim()
+    .toLowerCase();
+  const chartStatus = (await page.locator('app-market-chart .status-pill').first().innerText())
+    .trim()
+    .toLowerCase();
   if (headerStatus.includes('demo')) {
     expect(chartStatus).toBe('demo');
     expect(toastText).toContain('demo');
@@ -380,7 +557,8 @@ test('captures dense viewport and chart sanity for full desktop terminal', async
   expect(settingsBox!.y).toBeLessThan(900);
 
   const contrast = await page.evaluate(() => {
-    const get = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const get = (name: string) =>
+      getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     const parse = (value: string) => {
       const normalized = value.replace('#', '');
       if (normalized.length !== 6) return [0, 0, 0];
@@ -414,30 +592,36 @@ test('captures dense viewport and chart sanity for full desktop terminal', async
   expect(contrast.muted).toBeGreaterThan(2.6);
   expect(contrast.inputText).toBeGreaterThan(4);
 
-  const renderedControlColors = await page.locator('.toolbar-field .mat-mdc-select-value-text').evaluate((element) => {
-    const expectedToken = getComputedStyle(document.documentElement)
-      .getPropertyValue('--fakemex-input-text')
-      .trim();
-    const probe = document.createElement('span');
-    probe.style.color = expectedToken;
-    document.body.appendChild(probe);
-    const expected = getComputedStyle(probe).color;
-    probe.remove();
-    return {
-      actual: getComputedStyle(element).color,
-      expected,
-    };
-  });
+  const renderedControlColors = await page
+    .locator('.toolbar-field .mat-mdc-select-value-text')
+    .evaluate((element) => {
+      const expectedToken = getComputedStyle(document.documentElement)
+        .getPropertyValue('--fakemex-input-text')
+        .trim();
+      const probe = document.createElement('span');
+      probe.style.color = expectedToken;
+      document.body.appendChild(probe);
+      const expected = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        actual: getComputedStyle(element).color,
+        expected,
+      };
+    });
   expect(renderedControlColors.actual).toBe(renderedControlColors.expected);
-  const toolbarButtonColor = await page.getByRole('button', { name: 'Refresh' }).evaluate((element) => {
-    const token = getComputedStyle(document.documentElement).getPropertyValue('--fakemex-text').trim();
-    const probe = document.createElement('span');
-    probe.style.color = token;
-    document.body.appendChild(probe);
-    const expected = getComputedStyle(probe).color;
-    probe.remove();
-    return { actual: getComputedStyle(element).color, expected };
-  });
+  const toolbarButtonColor = await page
+    .getByRole('button', { name: 'Refresh' })
+    .evaluate((element) => {
+      const token = getComputedStyle(document.documentElement)
+        .getPropertyValue('--fakemex-text')
+        .trim();
+      const probe = document.createElement('span');
+      probe.style.color = token;
+      document.body.appendChild(probe);
+      const expected = getComputedStyle(probe).color;
+      probe.remove();
+      return { actual: getComputedStyle(element).color, expected };
+    });
   expect(toolbarButtonColor.actual).toBe(toolbarButtonColor.expected);
 
   await page.screenshot({
@@ -481,10 +665,12 @@ test('mobile layout remains usable and captures mobile terminal state', async ({
   expect(connection!.y).toBeGreaterThanOrEqual(topbar!.y + topbar!.height - 1);
   expect(tabs!.y).toBeGreaterThanOrEqual(connection!.y + connection!.height - 1);
   expect(panel!.y).toBeGreaterThanOrEqual(tabs!.y + tabs!.height - 1);
-  const inactiveTabColor = await page.getByRole('tab', { name: 'Order entry' }).evaluate((element) => {
-    const label = element.querySelector('.mdc-tab__text-label') ?? element;
-    return getComputedStyle(label).color;
-  });
+  const inactiveTabColor = await page
+    .getByRole('tab', { name: 'Order entry' })
+    .evaluate((element) => {
+      const label = element.querySelector('.mdc-tab__text-label') ?? element;
+      return getComputedStyle(label).color;
+    });
   expect(inactiveTabColor).not.toBe('rgba(0, 0, 0, 0.54)');
   await page.getByRole('tab', { name: 'Order entry' }).click();
   await expect(page.getByRole('heading', { name: 'Order entry' })).toBeVisible();

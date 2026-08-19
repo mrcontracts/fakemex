@@ -24,4 +24,15 @@ type TradingToggleRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
+type NetworkStatus struct {
+	Network           string   `json:"network"`
+	AvailableNetworks []string `json:"availableNetworks"`
+	TradingAvailable  bool     `json:"tradingAvailable"`
+	TradingEnabled    bool     `json:"tradingEnabled"`
+}
+
+type NetworkSwitchRequest struct {
+	Network string `json:"network"`
+}
+
 type ProblemResponse = exchange.Problem

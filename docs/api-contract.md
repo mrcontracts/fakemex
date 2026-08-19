@@ -1,14 +1,23 @@
 # FakeMex API contract
 
 All JSON decimal values are strings. Times are Unix milliseconds. The backend
-is hard-locked to Hyperliquid testnet and never returns signing credentials.
+supports Hyperliquid testnet and mainnet and never returns signing credentials.
+Every process starts on testnet, regardless of which network credentials exist.
 
 ## HTTP
 
 - `GET /api/v1/health` returns backend and upstream connection status.
+- `GET /api/v1/network` returns `{ network, availableNetworks,
+  tradingAvailable, tradingEnabled }`.
+- `PUT /api/v1/network` accepts `{ network: 'testnet' | 'mainnet' }`. A switch
+  atomically changes the exchange client, account, signer, and streams and
+  always disables trading. Mainnet selection returns `412 network_unavailable`
+  unless its complete signed credential profile was validated at startup.
+  `TRADING_ENABLED` independently controls write availability on both networks;
+  configured networks remain selectable read-only when it is false.
 - `GET /api/v1/trading` returns `{ available, enabled, network }`.
 - `PUT /api/v1/trading` accepts `{ enabled: boolean }`. Enabling succeeds only
-  when the backend was started with signed testnet trading permitted.
+  when signed trading is permitted and configured for the selected network.
 - `GET /api/v1/bootstrap?symbol=BTC&interval=15m` returns `markets`, selected
   `market`, `candles`, `book`, `trades`, and the configured account snapshot.
 - `GET /api/v1/markets` returns normalized perpetual metadata and contexts.
@@ -75,7 +84,9 @@ averagePrice?, message? }`. Validation and upstream failures use RFC 9457-style
 problem objects `{ type, title, status, detail, code, requestId, fields? }`.
 All state-changing requests require the configured local frontend `Origin`.
 Writes return `trading_disabled` until the runtime toggle is armed; it resets
-to off on every backend restart.
+to off on every backend restart and every network switch. Network switches wait
+for any in-flight write before changing the active signer, so a write cannot
+cross from one network configuration into the other.
 
 ## WebSocket
 
@@ -95,6 +106,8 @@ interface StreamEnvelope<T = unknown> {
 The first message is a complete `snapshot`. Reconnects receive a new snapshot;
 clients replace state, then apply later sequence numbers. The server sends ping
 frames and marks upstream connection changes with `connection` events.
+Switching networks closes subscriptions from the previous network; clients
+reconnect and receive a snapshot from the newly selected network.
 
 Public order book, trades, candles, and active asset context are forwarded from
 Hyperliquid websocket subscriptions without client-side polling. When an

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"log/slog"
 
@@ -380,6 +381,220 @@ func TestTradingCannotBeArmedWhenBackendDisallowsIt(t *testing.T) {
 	s.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusPreconditionFailed {
 		t.Fatalf("expected %d got %d body=%s", http.StatusPreconditionFailed, rec.Code, rec.Body.String())
+	}
+}
+
+func TestNetworkSwitchStartsOnTestnetAndDisarmsTrading(t *testing.T) {
+	t.Parallel()
+
+	testnet := baseConfig()
+	testnet.AccountConfigured = true
+	testnet.TradingAllowed = true
+	mainnet := testnet
+	mainnet.HLNetwork = config.NetworkMainnet
+	mainnet.HLAPIURL = config.MainnetAPIURL
+	mainnet.HLWsURL = config.MainnetWSURL
+
+	s, err := NewNetworkServer(testnet, map[string]NetworkBinding{
+		config.NetworkTestnet: {Config: testnet, Client: &fakeExchange{}, Configured: true, TradingAvailable: true},
+		config.NetworkMainnet: {Config: mainnet, Client: &fakeExchange{}, Configured: true, TradingAvailable: true},
+	}, config.NetworkTestnet, testingLogger())
+	if err != nil {
+		t.Fatalf("NewNetworkServer failed: %v", err)
+	}
+	router := s.Router()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/network", nil)
+	setLocalRemoteAddr(req)
+	router.ServeHTTP(rec, req)
+	var initial NetworkStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &initial); err != nil {
+		t.Fatalf("decode initial status: %v", err)
+	}
+	if rec.Code != http.StatusOK || initial.Network != config.NetworkTestnet {
+		t.Fatalf("expected testnet startup, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/v1/trading", strings.NewReader(`{"enabled":true}`))
+	setLocalRemoteAddr(req)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("arm testnet trading: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/v1/network", strings.NewReader(`{"network":"mainnet"}`))
+	setLocalRemoteAddr(req)
+	router.ServeHTTP(rec, req)
+	var switched NetworkStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &switched); err != nil {
+		t.Fatalf("decode switched status: %v", err)
+	}
+	if rec.Code != http.StatusOK || switched.Network != config.NetworkMainnet || switched.TradingEnabled || !switched.TradingAvailable {
+		t.Fatalf("expected configured, unarmed mainnet, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/v1/trading", strings.NewReader(`{"enabled":true}`))
+	setLocalRemoteAddr(req)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected configured mainnet trading to arm, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNetworkSwitchRejectsUnconfiguredMainnet(t *testing.T) {
+	t.Parallel()
+
+	testnet := baseConfig()
+	testnet.AccountConfigured = true
+	testnet.TradingAllowed = true
+	mainnet := testnet
+	mainnet.HLNetwork = config.NetworkMainnet
+	mainnet.HLAPIURL = config.MainnetAPIURL
+	mainnet.HLWsURL = config.MainnetWSURL
+	mainnet.HLAccountAddress = ""
+	mainnet.HLAPIWalletAddress = ""
+	mainnet.AccountConfigured = false
+
+	s, err := NewNetworkServer(testnet, map[string]NetworkBinding{
+		config.NetworkTestnet: {Config: testnet, Client: &fakeExchange{}, Configured: true, TradingAvailable: true},
+		config.NetworkMainnet: {Config: mainnet, Client: &fakeExchange{}, Configured: false, TradingAvailable: false},
+	}, config.NetworkTestnet, testingLogger())
+	if err != nil {
+		t.Fatalf("NewNetworkServer failed: %v", err)
+	}
+	s.tradingEnabled.Store(true)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/network", strings.NewReader(`{"network":"mainnet"}`))
+	setLocalRemoteAddr(req)
+	s.Router().ServeHTTP(rec, req)
+
+	var problem ProblemResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &problem); err != nil {
+		t.Fatalf("decode problem: %v", err)
+	}
+	if rec.Code != http.StatusPreconditionFailed || problem.Code != "network_unavailable" {
+		t.Fatalf("expected mainnet configuration error, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if s.current().cfg.HLNetwork != config.NetworkTestnet || !s.tradingEnabled.Load() {
+		t.Fatal("rejected switch must leave the active testnet runtime unchanged")
+	}
+	status := s.networkStatus(s.current())
+	if len(status.AvailableNetworks) != 1 || status.AvailableNetworks[0] != config.NetworkTestnet {
+		t.Fatalf("unconfigured mainnet must not be reported as available: %#v", status.AvailableNetworks)
+	}
+}
+
+func TestConfiguredMainnetCanBeSelectedWhenProcessTradingIsDisabled(t *testing.T) {
+	t.Parallel()
+
+	testnet := baseConfig()
+	mainnet := testnet
+	mainnet.HLNetwork = config.NetworkMainnet
+	mainnet.HLAPIURL = config.MainnetAPIURL
+	mainnet.HLWsURL = config.MainnetWSURL
+
+	s, err := NewNetworkServer(testnet, map[string]NetworkBinding{
+		config.NetworkTestnet: {Config: testnet, Client: &fakeExchange{}, Configured: true, TradingAvailable: false},
+		config.NetworkMainnet: {Config: mainnet, Client: &fakeExchange{}, Configured: true, TradingAvailable: false},
+	}, config.NetworkTestnet, testingLogger())
+	if err != nil {
+		t.Fatalf("NewNetworkServer failed: %v", err)
+	}
+	router := s.Router()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/network", strings.NewReader(`{"network":"mainnet"}`))
+	setLocalRemoteAddr(req)
+	router.ServeHTTP(rec, req)
+
+	var status NetworkStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode network status: %v", err)
+	}
+	if rec.Code != http.StatusOK || status.Network != config.NetworkMainnet || status.TradingAvailable || status.TradingEnabled {
+		t.Fatalf("expected read-only configured mainnet, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/v1/trading", strings.NewReader(`{"enabled":true}`))
+	setLocalRemoteAddr(req)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("process trading gate must apply on mainnet, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNetworkSwitchWaitsForInflightSignedAction(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	testnetClient := &fakeExchange{
+		MarketsFn: func(context.Context) ([]exchange.Market, error) {
+			return []exchange.Market{{Symbol: "BTC", SizePrecision: 2, PricePrecision: 2}}, nil
+		},
+		PlaceOrderFn: func(context.Context, exchange.OrderRequest) (exchange.WriteResponse, error) {
+			close(started)
+			<-release
+			return exchange.WriteResponse{Status: "ok"}, nil
+		},
+	}
+	testnet := baseConfig()
+	testnet.AccountConfigured = true
+	testnet.TradingAllowed = true
+	mainnet := testnet
+	mainnet.HLNetwork = config.NetworkMainnet
+	mainnet.HLAPIURL = config.MainnetAPIURL
+	mainnet.HLWsURL = config.MainnetWSURL
+
+	s, err := NewNetworkServer(testnet, map[string]NetworkBinding{
+		config.NetworkTestnet: {Config: testnet, Client: testnetClient, Configured: true, TradingAvailable: true},
+		config.NetworkMainnet: {Config: mainnet, Client: &fakeExchange{}, Configured: true, TradingAvailable: true},
+	}, config.NetworkTestnet, testingLogger())
+	if err != nil {
+		t.Fatalf("NewNetworkServer failed: %v", err)
+	}
+	s.tradingEnabled.Store(true)
+	router := s.Router()
+
+	orderDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/orders", strings.NewReader(`{"symbol":"BTC","side":"buy","kind":"limit","size":"1.00","price":"100.00","reduceOnly":false}`))
+		setLocalRemoteAddr(req)
+		router.ServeHTTP(rec, req)
+		orderDone <- rec
+	}()
+	<-started
+
+	switchDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/network", strings.NewReader(`{"network":"mainnet"}`))
+		setLocalRemoteAddr(req)
+		router.ServeHTTP(rec, req)
+		switchDone <- rec
+	}()
+	select {
+	case rec := <-switchDone:
+		close(release)
+		<-orderDone
+		t.Fatalf("network switched while a signed action was still in flight: status=%d", rec.Code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if rec := <-orderDone; rec.Code != http.StatusOK {
+		t.Fatalf("in-flight order failed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := <-switchDone; rec.Code != http.StatusOK {
+		t.Fatalf("network switch failed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if s.tradingEnabled.Load() {
+		t.Fatal("network switch must disarm trading")
 	}
 }
 

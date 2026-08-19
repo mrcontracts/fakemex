@@ -14,6 +14,37 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+const (
+	NetworkTestnet = "testnet"
+	NetworkMainnet = "mainnet"
+
+	TestnetAPIURL = "https://api.hyperliquid-testnet.xyz"
+	TestnetWSURL  = "wss://api.hyperliquid-testnet.xyz/ws"
+	MainnetAPIURL = "https://api.hyperliquid.xyz"
+	MainnetWSURL  = "wss://api.hyperliquid.xyz/ws"
+)
+
+type ExchangeConfig struct {
+	Network             string
+	APIURL              string
+	WsURL               string
+	AccountAddress      string
+	APIWalletAddress    string
+	APIWalletPrivateKey string
+}
+
+func (c ExchangeConfig) HasAccount() bool {
+	return c.AccountAddress != ""
+}
+
+func (c ExchangeConfig) HasTradingCredentials() bool {
+	return c.HasAccount() && c.APIWalletAddress != "" && c.APIWalletPrivateKey != ""
+}
+
+func (c ExchangeConfig) CanTrade(tradingAllowed bool) bool {
+	return tradingAllowed && c.HasTradingCredentials()
+}
+
 type Config struct {
 	HLNetwork              string
 	HLAPIURL               string
@@ -27,6 +58,7 @@ type Config struct {
 	TradingAllowed         bool
 	AutoBuilderFeeDisabled bool
 	AccountConfigured      bool
+	Networks               map[string]ExchangeConfig
 }
 
 func (c Config) CloneRedacted() map[string]any {
@@ -49,8 +81,59 @@ func (c Config) HasAccount() bool {
 	return c.HLAccountAddress != ""
 }
 
+func (c Config) ForNetwork(network string) (Config, bool) {
+	network = strings.ToLower(strings.TrimSpace(network))
+	if len(c.Networks) == 0 {
+		if strings.EqualFold(c.HLNetwork, network) {
+			return c, true
+		}
+		return Config{}, false
+	}
+	profile, ok := c.Networks[network]
+	if !ok {
+		return Config{}, false
+	}
+	selected := c
+	selected.HLNetwork = profile.Network
+	selected.HLAPIURL = profile.APIURL
+	selected.HLWsURL = profile.WsURL
+	selected.HLAccountAddress = profile.AccountAddress
+	selected.HLAPIWalletAddress = profile.APIWalletAddress
+	selected.HLAPIWalletPrivateKey = profile.APIWalletPrivateKey
+	selected.AccountConfigured = profile.HasAccount()
+	selected.Networks = nil
+	return selected, true
+}
+
+func (c Config) ConfiguredNetworks() []string {
+	configured := make([]string, 0, 2)
+	for _, network := range []string{NetworkTestnet, NetworkMainnet} {
+		if _, ok := c.ForNetwork(network); ok {
+			configured = append(configured, network)
+		}
+	}
+	return configured
+}
+
+func (c Config) WithoutPrivateKeys() Config {
+	redacted := c
+	redacted.HLAPIWalletPrivateKey = ""
+	if len(c.Networks) > 0 {
+		redacted.Networks = make(map[string]ExchangeConfig, len(c.Networks))
+		for name, profile := range c.Networks {
+			profile.APIWalletPrivateKey = ""
+			redacted.Networks[name] = profile
+		}
+	}
+	return redacted
+}
+
 func (c Config) CanTrade() bool {
-	return c.TradingAllowed && c.HasAccount() && c.HLAPIWalletAddress != "" && c.HLAPIWalletPrivateKey != ""
+	return c.TradingAllowed && c.HasTradingCredentials()
+}
+
+func (c Config) HasTradingCredentials() bool {
+	return c.HasAccount() && c.HLAPIWalletAddress != "" && c.HLAPIWalletPrivateKey != ""
 }
 
 func Load(path string) (Config, error) {
@@ -65,7 +148,14 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.AutoBuilderFeeDisabled = true
-	cfg.AccountConfigured = cfg.HasAccount()
+	testnet, _ := cfg.ForNetwork(NetworkTestnet)
+	cfg.HLNetwork = testnet.HLNetwork
+	cfg.HLAPIURL = testnet.HLAPIURL
+	cfg.HLWsURL = testnet.HLWsURL
+	cfg.HLAccountAddress = testnet.HLAccountAddress
+	cfg.HLAPIWalletAddress = testnet.HLAPIWalletAddress
+	cfg.HLAPIWalletPrivateKey = testnet.HLAPIWalletPrivateKey
+	cfg.AccountConfigured = testnet.HasAccount()
 	return cfg, nil
 }
 
@@ -108,39 +198,43 @@ func loadFromFile(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("TRADING_ENABLED: %w", err)
 	}
+	testnet := ExchangeConfig{
+		Network:             NetworkTestnet,
+		APIURL:              firstValue(vals["HL_TESTNET_API_URL"], vals["HL_API_URL"], TestnetAPIURL),
+		WsURL:               firstValue(vals["HL_TESTNET_WS_URL"], vals["HL_WS_URL"], TestnetWSURL),
+		AccountAddress:      firstValue(vals["HL_TESTNET_ACCOUNT_ADDRESS"], vals["HL_ACCOUNT_ADDRESS"]),
+		APIWalletAddress:    firstValue(vals["HL_TESTNET_API_WALLET_ADDRESS"], vals["HL_API_WALLET_ADDRESS"]),
+		APIWalletPrivateKey: firstValue(vals["HL_TESTNET_API_WALLET_PRIVATE_KEY"], vals["HL_API_WALLET_PRIVATE_KEY"]),
+	}
+	mainnet := ExchangeConfig{
+		Network:             NetworkMainnet,
+		APIURL:              firstValue(vals["HL_MAINNET_API_URL"], MainnetAPIURL),
+		WsURL:               firstValue(vals["HL_MAINNET_WS_URL"], MainnetWSURL),
+		AccountAddress:      vals["HL_MAINNET_ACCOUNT_ADDRESS"],
+		APIWalletAddress:    vals["HL_MAINNET_API_WALLET_ADDRESS"],
+		APIWalletPrivateKey: vals["HL_MAINNET_API_WALLET_PRIVATE_KEY"],
+	}
 	return Config{
-		HLNetwork:             vals["HL_NETWORK"],
-		HLAPIURL:              vals["HL_API_URL"],
-		HLWsURL:               vals["HL_WS_URL"],
-		HLAccountAddress:      vals["HL_ACCOUNT_ADDRESS"],
-		HLAPIWalletAddress:    vals["HL_API_WALLET_ADDRESS"],
-		HLAPIWalletPrivateKey: vals["HL_API_WALLET_PRIVATE_KEY"],
+		HLNetwork:             firstValue(vals["HL_NETWORK"], NetworkTestnet),
+		HLAPIURL:              testnet.APIURL,
+		HLWsURL:               testnet.WsURL,
+		HLAccountAddress:      testnet.AccountAddress,
+		HLAPIWalletAddress:    testnet.APIWalletAddress,
+		HLAPIWalletPrivateKey: testnet.APIWalletPrivateKey,
 		ServerAddr:            vals["SERVER_ADDR"],
 		FrontendOrigin:        vals["FRONTEND_ORIGIN"],
 		LogLevel:              vals["LOG_LEVEL"],
 		TradingAllowed:        tradingAllowed,
+		Networks: map[string]ExchangeConfig{
+			NetworkTestnet: testnet,
+			NetworkMainnet: mainnet,
+		},
 	}, nil
 }
 
 func validate(c Config) error {
-	if c.HLNetwork == "" {
-		return fmt.Errorf("HL_NETWORK is required")
-	}
-	if c.HLNetwork != "testnet" {
-		return fmt.Errorf("HL_NETWORK must be testnet")
-	}
-	if c.HLAPIURL == "" {
-		return fmt.Errorf("HL_API_URL is required")
-	}
-	apiURL, err := url.Parse(c.HLAPIURL)
-	if err != nil || apiURL.Scheme == "" || apiURL.Hostname() == "" {
-		return fmt.Errorf("HL_API_URL must be a valid absolute URL")
-	}
-	if c.HLWsURL == "" {
-		return fmt.Errorf("HL_WS_URL is required")
-	}
-	if !(strings.HasPrefix(c.HLWsURL, "wss://") || strings.HasPrefix(c.HLWsURL, "ws://")) {
-		return fmt.Errorf("HL_WS_URL must be ws:// or wss:// URL")
+	if legacyNetwork := strings.ToLower(strings.TrimSpace(c.HLNetwork)); legacyNetwork != "" && legacyNetwork != NetworkTestnet {
+		return fmt.Errorf("the startup network must be testnet; switch networks at runtime")
 	}
 	if c.ServerAddr == "" {
 		return fmt.Errorf("SERVER_ADDR is required")
@@ -154,31 +248,73 @@ func validate(c Config) error {
 	if !isLoopbackOrigin(c.FrontendOrigin) {
 		return fmt.Errorf("FRONTEND_ORIGIN must be an http(s) loopback origin")
 	}
-	if c.HLAPIWalletAddress != "" || c.HLAPIWalletPrivateKey != "" {
-		addr, err := deriveAddressFromPrivateKey(c.HLAPIWalletPrivateKey)
-		if err != nil {
-			return fmt.Errorf("HL_API_WALLET_PRIVATE_KEY invalid")
+	canTrade := false
+	for _, network := range []string{NetworkTestnet, NetworkMainnet} {
+		profile, ok := c.Networks[network]
+		if !ok {
+			return fmt.Errorf("%s network configuration is required", network)
 		}
-		if c.HLAPIWalletAddress == "" {
-			return fmt.Errorf("HL_API_WALLET_ADDRESS is required when private key is provided")
+		if err := validateExchangeConfig(profile); err != nil {
+			return err
 		}
-		if !strings.EqualFold(normalizedHex(addr), normalizedHex(c.HLAPIWalletAddress)) {
-			return fmt.Errorf("HL_API_WALLET_ADDRESS does not match derived address from HL_API_WALLET_PRIVATE_KEY")
-		}
+		canTrade = canTrade || profile.CanTrade(c.TradingAllowed)
 	}
-	if c.TradingAllowed {
-		if c.HLAccountAddress == "" || c.HLAPIWalletAddress == "" || c.HLAPIWalletPrivateKey == "" {
-			return fmt.Errorf("trading requires HL_ACCOUNT_ADDRESS, HL_API_WALLET_ADDRESS, and HL_API_WALLET_PRIVATE_KEY")
+	if c.TradingAllowed && !canTrade {
+		return fmt.Errorf("TRADING_ENABLED requires complete API-wallet credentials for at least one network")
+	}
+	return nil
+}
+
+func validateExchangeConfig(c ExchangeConfig) error {
+	expectedAPIURL, expectedWSURL := TestnetAPIURL, TestnetWSURL
+	if c.Network == NetworkMainnet {
+		expectedAPIURL, expectedWSURL = MainnetAPIURL, MainnetWSURL
+	} else if c.Network != NetworkTestnet {
+		return fmt.Errorf("unsupported Hyperliquid network %q", c.Network)
+	}
+	if !sameOfficialURL(c.APIURL, expectedAPIURL) {
+		return fmt.Errorf("HL_%s_API_URL must be the official %s endpoint", strings.ToUpper(c.Network), c.Network)
+	}
+	if !sameOfficialURL(c.WsURL, expectedWSURL) {
+		return fmt.Errorf("HL_%s_WS_URL must be the official %s endpoint", strings.ToUpper(c.Network), c.Network)
+	}
+	if c.APIWalletAddress != "" || c.APIWalletPrivateKey != "" {
+		if c.AccountAddress == "" {
+			return fmt.Errorf("HL_%s_ACCOUNT_ADDRESS is required with API-wallet credentials", strings.ToUpper(c.Network))
 		}
-		if apiURL.Scheme != "https" || !strings.EqualFold(apiURL.Hostname(), "api.hyperliquid-testnet.xyz") || apiURL.Port() != "" || strings.TrimRight(apiURL.EscapedPath(), "/") != "" {
-			return fmt.Errorf("trading requires the official testnet HL_API_URL")
+		address, err := deriveAddressFromPrivateKey(c.APIWalletPrivateKey)
+		if err != nil {
+			return fmt.Errorf("HL_%s_API_WALLET_PRIVATE_KEY invalid", strings.ToUpper(c.Network))
 		}
-		wsURL, err := url.Parse(c.HLWsURL)
-		if err != nil || wsURL.Scheme != "wss" || !strings.EqualFold(wsURL.Hostname(), "api.hyperliquid-testnet.xyz") || wsURL.Port() != "" || strings.TrimRight(wsURL.EscapedPath(), "/") != "/ws" {
-			return fmt.Errorf("trading requires the official testnet HL_WS_URL")
+		if c.APIWalletAddress == "" {
+			return fmt.Errorf("HL_%s_API_WALLET_ADDRESS is required when private key is provided", strings.ToUpper(c.Network))
+		}
+		if !strings.EqualFold(normalizedHex(address), normalizedHex(c.APIWalletAddress)) {
+			return fmt.Errorf("HL_%s_API_WALLET_ADDRESS does not match its private key", strings.ToUpper(c.Network))
 		}
 	}
 	return nil
+}
+
+func sameOfficialURL(value, expected string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	expectedURL, _ := url.Parse(expected)
+	return parsed.Scheme == expectedURL.Scheme &&
+		strings.EqualFold(parsed.Hostname(), expectedURL.Hostname()) &&
+		parsed.Port() == "" &&
+		strings.TrimRight(parsed.EscapedPath(), "/") == strings.TrimRight(expectedURL.EscapedPath(), "/")
+}
+
+func firstValue(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func parseBool(value string) (bool, error) {

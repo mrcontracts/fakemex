@@ -104,7 +104,7 @@ type exchangeEnvelope struct {
 	ExpiresAfter any               `json:"expiresAfter"`
 }
 
-func NewTradingClient(apiURL, wsURL, accountAddress, walletAddress, privateKey string, logger *slog.Logger) (ExchangeClient, error) {
+func NewTradingClient(apiURL, wsURL, accountAddress, walletAddress, privateKey string, isMainnet bool, logger *slog.Logger) (ExchangeClient, error) {
 	key, err := crypto.HexToECDSA(strings.TrimPrefix(strings.TrimSpace(privateKey), "0x"))
 	if err != nil {
 		return nil, fmt.Errorf("create signing wallet: invalid private key")
@@ -115,6 +115,7 @@ func NewTradingClient(apiURL, wsURL, accountAddress, walletAddress, privateKey s
 	}
 	client := newSafeClient(apiURL, wsURL, accountAddress, logger)
 	client.signingKey = key
+	client.isMainnet = isMainnet
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	vaultAddress, err := client.resolveTradingTarget(ctx, accountAddress)
@@ -141,7 +142,7 @@ func (c *safeClient) resolveTradingTarget(ctx context.Context, accountAddress st
 	case "agent":
 		return "", errors.New("HL_ACCOUNT_ADDRESS must be the master/subaccount address, not the API wallet address")
 	case "missing":
-		return "", errors.New("HL_ACCOUNT_ADDRESS does not exist on testnet")
+		return "", errors.New("HL_ACCOUNT_ADDRESS does not exist on the selected network")
 	default:
 		return "", errors.New("exchange returned an unknown account role")
 	}
@@ -541,7 +542,7 @@ func (c *safeClient) signAndPost(ctx context.Context, action any) (WriteResponse
 		return writeFailure(errWritesDisabled)
 	}
 	nonce := c.nextNonce()
-	signature, err := signL1ActionForVault(c.signingKey, action, nonce, false, c.vaultAddress)
+	signature, err := signL1ActionForVault(c.signingKey, action, nonce, c.isMainnet, c.vaultAddress)
 	if err != nil {
 		return writeFailure(fmt.Errorf("sign action: %w", err))
 	}

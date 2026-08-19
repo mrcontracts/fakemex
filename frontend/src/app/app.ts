@@ -14,7 +14,10 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormControl, FormsModule, ReactiveFormsModule } from '@angular/forms';
 import { GridStack, GridStackWidget } from 'gridstack';
-import { MatAutocompleteModule, MatAutocompleteSelectedEvent } from '@angular/material/autocomplete';
+import {
+  MatAutocompleteModule,
+  MatAutocompleteSelectedEvent,
+} from '@angular/material/autocomplete';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCheckboxModule } from '@angular/material/checkbox';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -22,7 +25,7 @@ import { MatInputModule } from '@angular/material/input';
 import { MatSelectChange, MatSelectModule } from '@angular/material/select';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatSliderModule } from '@angular/material/slider';
-import { MatSlideToggleModule } from '@angular/material/slide-toggle';
+import { MatSlideToggleChange, MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { Subject, finalize } from 'rxjs';
@@ -30,7 +33,7 @@ import { takeUntil } from 'rxjs/operators';
 import { FakeMexDataService } from './services/fakemex-data.service';
 import { LayoutPreset, LayoutService, PanelId, GridLayoutItem } from './services/layout.service';
 import { ThemeService } from './services/theme.service';
-import { Position, TriggerOrder, Fill, Funding, OrderWriteResult } from './models';
+import { Position, TriggerOrder, Fill, Funding, NetworkName, OrderWriteResult } from './models';
 import { PanelShellComponent } from './components/panel-shell.component';
 import { MarketChartComponent } from './components/market-chart.component';
 import { DepthChartComponent } from './components/depth-chart.component';
@@ -42,20 +45,20 @@ import { OrderRequest } from './models';
 import { orderReferencePrice, orderSubmissionMessage } from './order-notification';
 
 const panelTitles: Record<PanelId, string> = {
-  'chart': 'Chart',
+  chart: 'Chart',
   'order-form': 'Order entry',
-  'depth': 'Depth',
-  'book': 'Order book',
-  'trades': 'Recent trades',
-  'positions': 'Positions',
-  'orders': 'Open orders',
-  'triggers': 'Triggers',
-  'fills': 'Fills',
-  'history': 'History',
-  'funding': 'Funding',
-  'assets': 'Assets',
-  'leverage': 'Leverage',
-  'settings': 'Settings',
+  depth: 'Depth',
+  book: 'Order book',
+  trades: 'Recent trades',
+  positions: 'Positions',
+  orders: 'Open orders',
+  triggers: 'Triggers',
+  fills: 'Fills',
+  history: 'History',
+  funding: 'Funding',
+  assets: 'Assets',
+  leverage: 'Leverage',
+  settings: 'Settings',
 };
 
 const panelGeometryDefaults: Record<
@@ -67,19 +70,19 @@ const panelGeometryDefaults: Record<
   }
 > = {
   'order-form': { minW: 2, minH: 6 },
-  'chart': { minW: 5, minH: 8 },
-  'depth': { minW: 2, minH: 6 },
-  'book': { minW: 2, minH: 4 },
-  'trades': { minW: 2, minH: 4 },
-  'positions': { minW: 2, minH: 3 },
-  'orders': { minW: 2, minH: 3 },
-  'triggers': { minW: 2, minH: 3 },
-  'fills': { minW: 2, minH: 3 },
-  'history': { minW: 2, minH: 3 },
-  'funding': { minW: 2, minH: 3 },
-  'assets': { minW: 2, minH: 3 },
-  'leverage': { minW: 2, minH: 2 },
-  'settings': { minW: 2, minH: 2 },
+  chart: { minW: 5, minH: 8 },
+  depth: { minW: 2, minH: 6 },
+  book: { minW: 2, minH: 4 },
+  trades: { minW: 2, minH: 4 },
+  positions: { minW: 2, minH: 3 },
+  orders: { minW: 2, minH: 3 },
+  triggers: { minW: 2, minH: 3 },
+  fills: { minW: 2, minH: 3 },
+  history: { minW: 2, minH: 3 },
+  funding: { minW: 2, minH: 3 },
+  assets: { minW: 2, minH: 3 },
+  leverage: { minW: 2, minH: 2 },
+  settings: { minW: 2, minH: 2 },
 };
 
 @Component({
@@ -123,18 +126,24 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
   readonly data = this.api;
   readonly isNarrow = signal(false);
   readonly activeTab = signal<PanelId>('chart');
+  readonly closingPositionSymbols = signal<ReadonlySet<string>>(new Set());
   readonly layoutItems = computed(() => this.layout.activeLayout());
   readonly layoutPresets: LayoutPreset[] = ['basic', 'advanced', 'charting', 'custom'];
   readonly panelTitles = panelTitles;
   readonly connectionMode = computed(() => this.data.connection().phase);
   readonly tradingStatus = computed(() => this.data.tradingStatus());
   readonly tradingToggleBusy = signal(false);
+  readonly networkStatus = computed(() => this.data.networkStatus());
+  readonly networkToggleBusy = signal(false);
+  readonly isMainnet = computed(() => this.networkStatus().network === 'mainnet');
   readonly panelTabs: readonly PanelId[] = this.layout.panelIds;
   readonly activeTabIndex = computed(() => {
     const index = this.panelTabs.indexOf(this.activeTab());
     return index >= 0 ? index : 0;
   });
-  readonly themePickerControl = new FormControl(this.theme.activeTheme().label, { nonNullable: true });
+  readonly themePickerControl = new FormControl(this.theme.activeTheme().label, {
+    nonNullable: true,
+  });
 
   readonly statusText = computed(() => {
     if (this.data.loading()) return 'LOADING';
@@ -151,7 +160,8 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
 
   readonly connectionTone = computed(() => {
     if (this.data.isDemo()) return 'demo';
-    if (this.data.hasConnection() && !this.data.loading() && this.connectionMode() === 'online') return 'online';
+    if (this.data.hasConnection() && !this.data.loading() && this.connectionMode() === 'online')
+      return 'online';
     if (this.connectionMode() === 'reconnecting') return 'reconnecting';
     return 'offline';
   });
@@ -164,7 +174,8 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
       return 'Demo / offline';
     }
     if (this.connectionMode() === 'online') return 'Live stream connected';
-    if (this.connectionMode() === 'reconnecting') return this.data.connection().detail ?? 'Reconnecting';
+    if (this.connectionMode() === 'reconnecting')
+      return this.data.connection().detail ?? 'Reconnecting';
     if (this.data.error()) return this.data.error();
     return 'Backend unavailable';
   });
@@ -200,18 +211,24 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
   });
 
   readonly positionsRows = computed(() =>
-    this.api.positions().map((position: Position) => [
-      position.symbol,
-      position.side,
-      position.size,
-      position.entryPrice,
-      position.markPrice,
-      position.unrealizedPnl,
-      `${position.leverage}x`,
-      position.liquidation ?? '--',
-    ]),
+    this.api
+      .positions()
+      .map((position: Position) => [
+        position.symbol,
+        position.side,
+        position.size,
+        position.entryPrice,
+        position.markPrice,
+        position.unrealizedPnl,
+        `${position.leverage}x`,
+        position.liquidation ?? '--',
+      ]),
   );
-  readonly positionCellClass = (cell: unknown, _row: readonly unknown[], columnIndex: number): string => {
+  readonly positionCellClass = (
+    cell: unknown,
+    _row: readonly unknown[],
+    columnIndex: number,
+  ): string => {
     const value = String(cell).trim().toLowerCase();
     if (columnIndex === 1) {
       if (value === 'buy') return 'cell-buy';
@@ -224,51 +241,72 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
     }
     return '';
   };
+  readonly positionCloseLabel = (row: readonly unknown[]): string =>
+    this.isPositionClosePending(row) ? 'Closing…' : 'Close';
+  readonly positionCloseAriaLabel = (row: readonly unknown[]): string => {
+    const symbol = this.positionSymbolFromRow(row);
+    return `${this.isPositionClosePending(row) ? 'Closing' : 'Close'} ${symbol} position`;
+  };
+  readonly positionCloseDisabled = (row: readonly unknown[]): boolean =>
+    this.isPositionClosePending(row);
   readonly ordersRows = computed(() =>
-    this.api.orders().map((order) => [
-      order.oid,
-      order.symbol,
-      order.side,
-      order.kind,
-      order.size,
-      order.price ?? '--',
-      order.reduceOnly ? 'RO' : 'No',
-      order.status,
-    ]),
+    this.api
+      .orders()
+      .map((order) => [
+        order.oid,
+        order.symbol,
+        order.side,
+        order.kind,
+        order.size,
+        order.price ?? '--',
+        order.reduceOnly ? 'RO' : 'No',
+        order.status,
+      ]),
   );
   readonly triggerRows = computed(() =>
-    this.api.triggerOrders().map((order: TriggerOrder) => [
-      order.oid,
-      order.symbol,
-      order.side,
-      order.kind,
-      order.triggerPrice,
-      order.price ?? '--',
-      order.status,
-    ]),
+    this.api
+      .triggerOrders()
+      .map((order: TriggerOrder) => [
+        order.oid,
+        order.symbol,
+        order.side,
+        order.kind,
+        order.triggerPrice,
+        order.price ?? '--',
+        order.status,
+      ]),
   );
   readonly fillsRows = computed(() =>
-    this.api.fills().map((fill: Fill) => [fill.fillId, fill.symbol, fill.side, fill.px, fill.size, fill.fee]),
+    this.api
+      .fills()
+      .map((fill: Fill) => [fill.fillId, fill.symbol, fill.side, fill.px, fill.size, fill.fee]),
   );
   readonly historyRows = computed(() =>
-    this.api.fills().slice(0, 12).map((fill: Fill) => [
-      new Date(fill.ts).toLocaleTimeString(),
-      fill.symbol,
-      fill.side,
-      fill.px,
-      fill.size,
-    ]),
+    this.api
+      .fills()
+      .slice(0, 12)
+      .map((fill: Fill) => [
+        new Date(fill.ts).toLocaleTimeString(),
+        fill.symbol,
+        fill.side,
+        fill.px,
+        fill.size,
+      ]),
   );
   readonly fundingRows = computed(() =>
-    this.api.funding().map((funding: Funding) => [
-      funding.symbol,
-      funding.rate,
-      funding.payment,
-      new Date(funding.ts).toLocaleTimeString(),
-    ]),
+    this.api
+      .funding()
+      .map((funding: Funding) => [
+        funding.symbol,
+        funding.rate,
+        funding.payment,
+        new Date(funding.ts).toLocaleTimeString(),
+      ]),
   );
   readonly assetsRows = computed(() =>
-    this.api.assets().map((asset) => [asset.coin, asset.wallet, asset.available, asset.crossMarginUsed]),
+    this.api
+      .assets()
+      .map((asset) => [asset.coin, asset.wallet, asset.available, asset.crossMarginUsed]),
   );
 
   readonly leverageValue = signal(0);
@@ -288,17 +326,18 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
         return;
       }
       this.grid.load(
-        this.normalizeGridLayout(this.layoutItems()).map((item: GridLayoutItem) =>
-          ({
-            id: item.id,
-            x: item.x,
-            y: item.y,
-            w: item.w,
-            h: item.h,
-            minW: this.panelGeometry(item.id).minW,
-            minH: this.panelGeometry(item.id).minH,
-            maxH: this.panelGeometry(item.id).maxH,
-          }) as GridStackWidget,
+        this.normalizeGridLayout(this.layoutItems()).map(
+          (item: GridLayoutItem) =>
+            ({
+              id: item.id,
+              x: item.x,
+              y: item.y,
+              w: item.w,
+              h: item.h,
+              minW: this.panelGeometry(item.id).minW,
+              minH: this.panelGeometry(item.id).minH,
+              maxH: this.panelGeometry(item.id).maxH,
+            }) as GridStackWidget,
         ),
       );
     });
@@ -356,52 +395,126 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
     const market = this.selectedMarket();
     const referencePrice = orderReferencePrice(payload, market?.markPx);
     const quote = market?.quote ?? 'USD';
-    this.api.submitOrder(payload)
+    this.api
+      .submitOrder(payload)
       .pipe(takeUntil(this.destroy$))
       .subscribe((result) => this.handleOrderSubmission(result, payload, referencePrice, quote));
   }
 
   sendLeverage(mode: 'cross' | 'isolated') {
     if (!this.guardTrading()) return;
-    this.api.updateLeverage({ mode, leverage: this.leverageValue() })
+    this.api
+      .updateLeverage({ mode, leverage: this.leverageValue() })
       .pipe(takeUntil(this.destroy$))
       .subscribe((result) => this.handleWriteResult(result));
   }
 
   setLeverage(value: number) {
     const safeMax = Math.max(1, this.data.selectedMarket()?.leverage.maxLeverage ?? 100);
-    const safeValue = Number.isFinite(value) ? Math.max(1, Math.min(Math.trunc(value), safeMax)) : 1;
+    const safeValue = Number.isFinite(value)
+      ? Math.max(1, Math.min(Math.trunc(value), safeMax))
+      : 1;
     this.leverageValue.set(safeValue);
   }
 
-  closePositions(percent: 25 | 50 | 75 | 100) {
+  closeSelectedPosition(percent: 25 | 50 | 75 | 100) {
+    this.closePositionForSymbol(this.data.selectedSymbol(), percent);
+  }
+
+  closePositionRow(row: readonly unknown[]) {
+    const symbol = this.positionSymbolFromRow(row);
+    if (!symbol) {
+      this.showTradingWarning('Cannot close this position because its symbol is missing.');
+      return;
+    }
+    this.closePositionForSymbol(symbol, 100);
+  }
+
+  private closePositionForSymbol(symbol: string, percent: 25 | 50 | 75 | 100) {
     if (!this.guardTrading()) return;
-    this.api.closePosition({ percent, kind: 'market' })
-      .pipe(takeUntil(this.destroy$))
-      .subscribe((result) => this.handleWriteResult(result));
+    symbol = symbol.trim().toUpperCase();
+    if (!symbol || this.closingPositionSymbols().has(symbol)) return;
+    this.closingPositionSymbols.update((symbols) => new Set(symbols).add(symbol));
+    this.api
+      .closePosition({ percent, kind: 'market' }, symbol)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.closingPositionSymbols.update((symbols) => {
+            const next = new Set(symbols);
+            next.delete(symbol);
+            return next;
+          });
+        }),
+      )
+      .subscribe((result) => this.handlePositionCloseResult(result, symbol, percent));
   }
 
   onTradingToggle(enabled: boolean) {
-    if (this.tradingToggleBusy()) return;
+    if (this.tradingToggleBusy() || this.networkToggleBusy()) return;
     if (enabled && !this.tradingStatus().available) {
-      this.showTradingWarning('Trading is unavailable. Enable signed testnet trading in config/local.env and restart the backend.');
+      this.showTradingWarning(
+        `Trading is unavailable. Configure signed ${this.tradingStatus().network} credentials in config/local.env and restart the backend.`,
+      );
       return;
     }
     this.tradingToggleBusy.set(true);
-    this.api.setTradingEnabled(enabled)
+    this.api
+      .setTradingEnabled(enabled)
       .pipe(
         takeUntil(this.destroy$),
         finalize(() => this.tradingToggleBusy.set(false)),
       )
       .subscribe({
         next: (status) => {
-          if (!status.enabled) {
-            this.showTradingWarning('Trading is disabled. Orders and position changes will be blocked.');
+          if (status.enabled && status.network === 'mainnet') {
+            this.showTradingWarning(
+              'MAINNET TRADING IS ON. Orders and position changes can use real funds.',
+            );
+          } else if (!status.enabled) {
+            this.showTradingWarning(
+              'Trading is disabled. Orders and position changes will be blocked.',
+            );
           }
         },
         error: () => {
           this.api.loadTradingStatus();
-          this.showTradingWarning('The backend refused the trading toggle. Trading remains disabled.');
+          this.showTradingWarning(
+            'The backend refused the trading toggle. Trading remains disabled.',
+          );
+        },
+      });
+  }
+
+  onNetworkToggle(event: MatSlideToggleChange) {
+    if (this.networkToggleBusy() || this.tradingToggleBusy()) return;
+    const mainnet = event.checked;
+    const network: NetworkName = mainnet ? 'mainnet' : 'testnet';
+    if (network === this.networkStatus().network) return;
+
+    this.networkToggleBusy.set(true);
+    this.api
+      .setNetwork(network)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => this.networkToggleBusy.set(false)),
+      )
+      .subscribe({
+        next: (status) => {
+          if (status.network === 'mainnet') {
+            this.showTradingWarning(
+              'MAINNET selected. Trading was disabled. Re-enabling Trading can place real orders with real funds.',
+            );
+          } else {
+            this.showTradingWarning(
+              'Testnet selected. Trading was disabled; re-enable it explicitly when ready.',
+            );
+          }
+        },
+        error: (error) => {
+          event.source.checked = this.isMainnet();
+          this.api.loadTradingStatus();
+          this.showTradingWarning(this.api.errorMessage(error));
         },
       });
   }
@@ -448,9 +561,10 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
   }
 
   onRefreshFrequency(valueOrEvent: number | Event) {
-    const value = typeof valueOrEvent === 'number'
-      ? valueOrEvent
-      : Number((valueOrEvent.target as HTMLInputElement).value);
+    const value =
+      typeof valueOrEvent === 'number'
+        ? valueOrEvent
+        : Number((valueOrEvent.target as HTMLInputElement).value);
     if (!Number.isFinite(value)) return;
     this.data.setRefreshInterval(value);
   }
@@ -511,7 +625,9 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
           w: node.w ?? 1,
           h: node.h ?? 1,
         }))
-        .filter((item): item is { id: string; x: number; y: number; w: number; h: number } => this.isPanelId(item.id))
+        .filter((item): item is { id: string; x: number; y: number; w: number; h: number } =>
+          this.isPanelId(item.id),
+        )
         .map((item) => this.normalizeGridLayout([{ ...item, id: item.id as PanelId }])[0])
         .filter((item): item is GridLayoutItem => Boolean(item));
       this.layout.setCustomLayout(custom);
@@ -597,11 +713,15 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
   private guardTrading(): boolean {
     const status = this.tradingStatus();
     if (!status.available) {
-      this.showTradingWarning('Trading is unavailable. Signed testnet trading is not configured in the backend.');
+      this.showTradingWarning(
+        `Trading is unavailable. Signed ${status.network} trading is not configured in the backend.`,
+      );
       return false;
     }
     if (!status.enabled) {
-      this.showTradingWarning('Trading is disabled. Turn on the Trading toggle before sending an order.');
+      this.showTradingWarning(
+        'Trading is disabled. Turn on the Trading toggle before sending an order.',
+      );
       return false;
     }
     return true;
@@ -611,6 +731,35 @@ export class App implements OnInit, OnDestroy, AfterViewInit {
     if (result.status === 'error') {
       this.showTradingWarning(result.message || 'The exchange rejected the trading action.');
     }
+  }
+
+  private handlePositionCloseResult(
+    result: OrderWriteResult,
+    symbol: string,
+    percent: 25 | 50 | 75 | 100,
+  ): void {
+    if (result.status === 'error') {
+      this.handleWriteResult(result);
+      return;
+    }
+    const fill = result.averagePrice ? ` at ${result.averagePrice}` : '';
+    const amount = percent === 100 ? 'Position close' : `${percent}% position close`;
+    this.snackBar.open(`${amount} submitted for ${symbol}${fill}.`, 'Dismiss', {
+      duration: 7000,
+      horizontalPosition: 'center',
+      verticalPosition: 'top',
+      panelClass: ['trade-submitted'],
+    });
+  }
+
+  private positionSymbolFromRow(row: readonly unknown[]): string {
+    return String(row[0] ?? '')
+      .trim()
+      .toUpperCase();
+  }
+
+  private isPositionClosePending(row: readonly unknown[]): boolean {
+    return this.closingPositionSymbols().has(this.positionSymbolFromRow(row));
   }
 
   private handleOrderSubmission(

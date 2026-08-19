@@ -1,11 +1,6 @@
 export type OrderSide = 'buy' | 'sell';
 export type OrderKind =
-  | 'limit'
-  | 'market'
-  | 'stopMarket'
-  | 'stopLimit'
-  | 'takeProfitMarket'
-  | 'takeProfitLimit';
+  'limit' | 'market' | 'stopMarket' | 'stopLimit' | 'takeProfitMarket' | 'takeProfitLimit';
 export type TimeInForce = 'gtc' | 'ioc' | 'alo';
 
 export interface MarketMeta {
@@ -167,14 +162,23 @@ export interface Health {
   accountReady: boolean;
   tradingAvailable: boolean;
   tradingEnabled: boolean;
-  network: string;
+  network: NetworkName;
   timestamp: number;
 }
 
 export interface TradingStatus {
   available: boolean;
   enabled: boolean;
-  network: string;
+  network: NetworkName;
+}
+
+export type NetworkName = 'testnet' | 'mainnet';
+
+export interface NetworkStatus {
+  network: NetworkName;
+  availableNetworks: NetworkName[];
+  tradingAvailable: boolean;
+  tradingEnabled: boolean;
 }
 
 export interface ConnectionState {

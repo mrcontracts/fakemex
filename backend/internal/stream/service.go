@@ -127,19 +127,42 @@ func (m *Manager) Subscribe(ctx context.Context, symbol, interval string) (Subsc
 	m.mu.Unlock()
 
 	closeFn := func() {
+		shouldClose := false
 		m.mu.Lock()
 		if current, ok := m.feeds[key]; ok {
-			delete(current.clients, out)
+			if _, subscribed := current.clients[out]; subscribed {
+				delete(current.clients, out)
+				shouldClose = true
+			}
 			if len(current.clients) == 0 && current.cancel != nil {
 				current.cancel()
 				delete(m.feeds, key)
 			}
 		}
 		m.mu.Unlock()
-		close(out)
+		if shouldClose {
+			close(out)
+		}
 	}
 
 	return Subscription{Events: out, Close: closeFn}, nil
+}
+
+// Reset terminates all active upstream feeds and downstream subscriptions.
+// The manager remains reusable so a network can be selected again later.
+func (m *Manager) Reset() {
+	m.mu.Lock()
+	for key, current := range m.feeds {
+		if current.cancel != nil {
+			current.cancel()
+		}
+		for out := range current.clients {
+			close(out)
+			delete(current.clients, out)
+		}
+		delete(m.feeds, key)
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) key(symbol, interval string) string {

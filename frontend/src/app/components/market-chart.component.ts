@@ -15,8 +15,18 @@ import {
   ViewChild,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { CandlestickData, CandlestickSeries, createChart, CrosshairMode, IChartApi, Time, UTCTimestamp } from 'lightweight-charts';
-import { Candle } from '../models';
+import {
+  CandlestickData,
+  CandlestickSeries,
+  createChart,
+  CrosshairMode,
+  IChartApi,
+  IPriceLine,
+  LineStyle,
+  Time,
+  UTCTimestamp,
+} from 'lightweight-charts';
+import { Candle, Position } from '../models';
 import { ThemeService } from '../services/theme.service';
 
 @Component({
@@ -35,8 +45,22 @@ import { ThemeService } from '../services/theme.service';
       >
         {{ duration }}
       </button>
+      @if (activePosition(); as position) {
+        <span
+          class="position-pill"
+          [class.position-buy]="position.side === 'buy'"
+          [class.position-sell]="position.side === 'sell'"
+        >
+          {{ position.side | uppercase }} {{ position.size }} @ {{ position.entryPrice }} · PnL
+          <span [ngClass]="positionPnlClass(position)">{{ position.unrealizedPnl }}</span>
+        </span>
+      }
       <span class="toolbar-spacer"></span>
-      <span class="status-pill" [class.offline]="statusTone() === 'offline'" [class.demo]="statusTone() === 'demo'">
+      <span
+        class="status-pill"
+        [class.offline]="statusTone() === 'offline'"
+        [class.demo]="statusTone() === 'demo'"
+      >
         {{ connectionStatusLabel() }}
       </span>
     </div>
@@ -70,7 +94,11 @@ import { ThemeService } from '../services/theme.service';
 
       .interval {
         border: 1px solid var(--fakemex-border);
-        background: color-mix(in srgb, var(--fakemex-panel-header) 72%, var(--fakemex-chart-bg) 28%);
+        background: color-mix(
+          in srgb,
+          var(--fakemex-panel-header) 72%,
+          var(--fakemex-chart-bg) 28%
+        );
         border-radius: var(--fakemex-radius);
         color: var(--fakemex-muted);
         font-size: 0.73rem;
@@ -85,6 +113,33 @@ import { ThemeService } from '../services/theme.service';
 
       .toolbar-spacer {
         flex: 1;
+      }
+
+      .position-pill {
+        border: 1px solid var(--fakemex-border);
+        border-radius: var(--fakemex-radius);
+        padding: 0.25rem 0.65rem;
+        font-size: 0.72rem;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .position-pill.position-buy {
+        border-color: color-mix(in srgb, var(--fakemex-buy) 58%, var(--fakemex-border) 42%);
+        color: var(--fakemex-buy);
+      }
+
+      .position-pill.position-sell {
+        border-color: color-mix(in srgb, var(--fakemex-sell) 58%, var(--fakemex-border) 42%);
+        color: var(--fakemex-sell);
+      }
+
+      .position-pill .pnl-positive {
+        color: var(--fakemex-buy);
+      }
+
+      .position-pill .pnl-negative {
+        color: var(--fakemex-sell);
       }
 
       .status-pill {
@@ -121,6 +176,7 @@ import { ThemeService } from '../services/theme.service';
 export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy {
   @Input() symbol = 'BTC';
   @Input() candles: Candle[] = [];
+  @Input() positions: Position[] = [];
   @Input() selectedInterval = '15m';
   @Input() connectionStatus: 'Live' | 'Demo' | 'Offline' = 'Offline';
   @Output() intervalRequested = new EventEmitter<string>();
@@ -128,6 +184,7 @@ export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy
   readonly intervals = ['1m', '5m', '15m', '1h', '4h', '1d'];
   private chart?: IChartApi;
   private candleSeries?: ReturnType<IChartApi['addSeries']>;
+  private positionPriceLines: IPriceLine[] = [];
   private resizeObserver?: ResizeObserver;
   private readonly theme = inject(ThemeService);
   private themeDisposer = effect(() => {
@@ -135,11 +192,12 @@ export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy
     this.ngZone.runOutsideAngular(() => {
       this.applyChartTheme();
       const points = this.currentDataPoints();
-      if (!this.chart || !points.length) {
-        return;
+      if (!this.chart) return;
+      if (points.length) {
+        this.candleSeries?.setData(points);
+        this.chart.timeScale().fitContent();
       }
-      this.candleSeries?.setData(points);
-      this.chart.timeScale().fitContent();
+      this.syncPositionPriceLines();
     });
   });
   private requestedRaf = 0;
@@ -158,6 +216,22 @@ export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy
     return this.connectionStatus;
   }
 
+  activePosition(): Position | undefined {
+    return this.positions.find(
+      (position) =>
+        position.symbol.toUpperCase() === this.symbol.toUpperCase() &&
+        Number.isFinite(Number(position.size)) &&
+        Number(position.size) !== 0,
+    );
+  }
+
+  positionPnlClass(position: Position): string {
+    const pnl = Number(position.unrealizedPnl);
+    if (pnl > 0) return 'pnl-positive';
+    if (pnl < 0) return 'pnl-negative';
+    return '';
+  }
+
   ngAfterViewInit() {
     this.ngZone.runOutsideAngular(() => {
       requestAnimationFrame(() => this.renderCandles());
@@ -171,8 +245,13 @@ export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy
   }
 
   ngOnChanges(changes: SimpleChanges): void {
-    if (!changes['candles']) return;
-    this.ngZone.runOutsideAngular(() => this.renderCandles());
+    if (changes['candles'] || changes['symbol']) {
+      this.ngZone.runOutsideAngular(() => this.renderCandles());
+      return;
+    }
+    if (changes['positions']) {
+      this.ngZone.runOutsideAngular(() => this.syncPositionPriceLines());
+    }
   }
 
   ngOnDestroy() {
@@ -181,6 +260,7 @@ export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy
     if (this.requestedRaf) {
       cancelAnimationFrame(this.requestedRaf);
     }
+    this.clearPositionPriceLines();
     this.chart?.remove();
   }
 
@@ -212,6 +292,7 @@ export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy
       this.chart.timeScale().fitContent();
     }
     this.applyChartTheme();
+    this.syncPositionPriceLines();
     this.requestedRaf = 0;
   }
 
@@ -226,7 +307,7 @@ export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy
           Number.isFinite(Number(item.c)),
       )
       .map<CandlestickData>((item) => ({
-        time: (Math.floor(item.t / 1000) as UTCTimestamp) as Time,
+        time: Math.floor(item.t / 1000) as UTCTimestamp as Time,
         open: Number(item.o),
         high: Number(item.h),
         low: Number(item.l),
@@ -305,6 +386,54 @@ export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy
     });
   }
 
+  private syncPositionPriceLines() {
+    this.clearPositionPriceLines();
+    if (!this.candleSeries) return;
+
+    const position = this.activePosition();
+    if (!position) return;
+    const entryPrice = Number(position.entryPrice);
+    if (!Number.isFinite(entryPrice) || entryPrice <= 0) return;
+
+    const theme = this.readThemeVars();
+    const sideColor = position.side === 'buy' ? theme.buy : theme.sell;
+    this.positionPriceLines.push(
+      this.candleSeries.createPriceLine({
+        price: entryPrice,
+        color: sideColor,
+        lineWidth: 2,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `${position.side.toUpperCase()} ${position.size}`,
+      }),
+    );
+
+    const liquidationPrice = Number(position.liquidation);
+    if (Number.isFinite(liquidationPrice) && liquidationPrice > 0) {
+      this.positionPriceLines.push(
+        this.candleSeries.createPriceLine({
+          price: liquidationPrice,
+          color: theme.sell,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: 'LIQ',
+        }),
+      );
+    }
+  }
+
+  private clearPositionPriceLines() {
+    if (!this.candleSeries) {
+      this.positionPriceLines = [];
+      return;
+    }
+    for (const line of this.positionPriceLines) {
+      this.candleSeries.removePriceLine(line);
+    }
+    this.positionPriceLines = [];
+  }
+
   private readThemeVars() {
     const style = getComputedStyle(document.documentElement);
     return {
@@ -314,6 +443,8 @@ export class MarketChartComponent implements AfterViewInit, OnChanges, OnDestroy
       chartAxis: style.getPropertyValue('--fakemex-chart-axis').trim() || '#213255',
       upCandle: style.getPropertyValue('--fakemex-up-candle').trim() || '#31d0aa',
       downCandle: style.getPropertyValue('--fakemex-down-candle').trim() || '#f6465d',
+      buy: style.getPropertyValue('--fakemex-buy').trim() || '#31d0aa',
+      sell: style.getPropertyValue('--fakemex-sell').trim() || '#f6465d',
     };
   }
 }

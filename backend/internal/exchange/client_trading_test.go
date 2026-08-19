@@ -76,6 +76,40 @@ func TestL1SigningMatchesOfficialHyperliquidSDKVector(t *testing.T) {
 	}
 }
 
+func TestL1MainnetSigningMatchesOfficialHyperliquidSDKVector(t *testing.T) {
+	t.Parallel()
+	fixtureKey := strings.Repeat("0123456789", 6) + "0123"
+	key, err := crypto.HexToECDSA(fixtureKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := orderAction{
+		Type: "order",
+		Orders: []wireOrder{{
+			Asset:      1,
+			IsBuy:      true,
+			LimitPrice: "100",
+			Size:       "100",
+			ReduceOnly: false,
+			OrderType:  wireLimitOrderType{Limit: wireLimit{TIF: "Gtc"}},
+		}},
+		Grouping: "na",
+	}
+	signature, err := signL1Action(key, action, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signature.R != "0xd65369825a9df5d80099e513cce430311d7d26ddf477f5b3a33d2806b100d78e" {
+		t.Fatalf("unexpected r: %s", signature.R)
+	}
+	if signature.S != "0x2b54116ff64054968aa237c20ca9ff68000f977c93289157748a3162b6ea940e" {
+		t.Fatalf("unexpected s: %s", signature.S)
+	}
+	if signature.V != 28 {
+		t.Fatalf("unexpected v: %d", signature.V)
+	}
+}
+
 func TestVaultSigningMatchesOfficialHyperliquidSDKVector(t *testing.T) {
 	t.Parallel()
 	fixtureKey := strings.Repeat("0123456789", 6) + "0123"
@@ -124,7 +158,7 @@ func TestTradingClientDetectsSubaccountTarget(t *testing.T) {
 	}
 	wallet := crypto.PubkeyToAddress(key.PublicKey).Hex()
 	const subaccount = "0x1719884eb866cb12b2287399b15f7db5e7d775ea"
-	client, err := NewTradingClient(server.URL, "ws://example.invalid", subaccount, wallet, hex.EncodeToString(crypto.FromECDSA(key)), testingLogger())
+	client, err := NewTradingClient(server.URL, "ws://example.invalid", subaccount, wallet, hex.EncodeToString(crypto.FromECDSA(key)), false, testingLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
