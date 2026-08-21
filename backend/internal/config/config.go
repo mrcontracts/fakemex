@@ -171,8 +171,8 @@ func loadFromFile(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("inspect config file %s: %w", path, err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return Config{}, fmt.Errorf("config file %s must not be accessible by group or others", path)
+	if err := validateConfigFilePermissions(path, info); err != nil {
+		return Config{}, err
 	}
 
 	scanner := bufio.NewScanner(f)

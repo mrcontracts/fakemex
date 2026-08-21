@@ -256,5 +256,6 @@ func writeTempConfig(t *testing.T, lines string) string {
 	if err := os.WriteFile(cfgPath, []byte(lines), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	secureTestConfigFile(t, cfgPath)
 	return cfgPath
 }

@@ -18,8 +18,59 @@ account, and order data use Hyperliquid's official API.
 
 - Node.js 26 and npm 12
 - Go 1.26
-- Bash, `curl`, CA certificates, and `ss` from `iproute2`
-- A C build toolchain (`build-essential` on Ubuntu) for the Go dependencies
+- Git and current CA certificates
+- On native Windows: Windows 10 or 11 with Windows PowerShell 5.1 or newer
+- On Linux/WSL: Bash, `curl`, `ss` from `iproute2`, `make`, and a C build
+  toolchain (`build-essential` on Ubuntu)
+
+## Install on Windows
+
+Install current 64-bit releases of Node.js and Go, then verify them from
+Windows PowerShell:
+
+```powershell
+node --version
+npm --version
+go version
+```
+
+Install dependencies:
+
+```powershell
+Push-Location frontend
+npm ci
+Pop-Location
+Push-Location backend
+go mod download
+Pop-Location
+```
+
+Create the local configuration if it does not already exist:
+
+```powershell
+if (-not (Test-Path config\local.env)) {
+    Copy-Item config\local.env.example config\local.env
+}
+```
+
+Restrict the credential file to the current Windows user before adding account
+or API-wallet values:
+
+```powershell
+$configPath = (Resolve-Path config\local.env).Path
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$acl = Get-Acl -LiteralPath $configPath
+$acl.SetAccessRuleProtection($true, $false)
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $identity, 'FullControl', 'Allow'
+)
+$acl.SetAccessRule($rule)
+Set-Acl -LiteralPath $configPath -AclObject $acl
+```
+
+Edit `config\local.env` as described below, then start FakeMex with
+`.\launch.ps1`. The launcher requires ports `8080` and `4200` to be
+available.
 
 ## Install on Linux
 
@@ -75,9 +126,10 @@ Edit `config/local.env` as described below, then start FakeMex with
 
 ## Local configuration
 
-`config/local.env` is ignored by Git and should have mode `0600`. If it does
-not exist, copy `config/local.env.example`. Each network has an independent
-profile:
+`config/local.env` is ignored by Git. It must have mode `0600` on Linux or a
+Windows ACL that limits reads to the current user, Local System, and
+Administrators. If it does not exist, copy `config/local.env.example`. Each
+network has an independent profile:
 
 - `HL_TESTNET_ACCOUNT_ADDRESS` / `HL_MAINNET_ACCOUNT_ADDRESS`: the master
   account or subaccount queried on that network
@@ -112,7 +164,38 @@ and its Trading toggle cannot be armed.
 
 ## Run locally
 
-Start both services from one command (recommended):
+### Native Windows
+
+Start both services from Windows PowerShell:
+
+```powershell
+.\launch.ps1
+```
+
+If local script execution is blocked, unblock this checked-out script and run
+it again:
+
+```powershell
+Unblock-File .\launch.ps1
+.\launch.ps1
+```
+
+Use a different workspace-local config file when needed:
+
+```powershell
+$env:FAKEMEX_CONFIG = (Resolve-Path config\alternate.env).Path
+.\launch.ps1
+```
+
+The launcher builds the Windows backend to `.run\fakemex.exe`, installs
+frontend dependencies when needed, checks the configured ports, starts both
+services with logs under `.run`, and stops them on `Ctrl+C`. Running it again
+safely replaces this project's processes and refuses to stop unrelated port
+owners.
+
+### Linux
+
+Start both services from one command:
 
 ```sh
 ./launch.sh
@@ -152,6 +235,34 @@ distribution. The wrapper stays attached to `launch.sh`, so `Ctrl+C` performs
 the launcher's normal cleanup and its exit code is returned to PowerShell.
 
 ## Verify
+
+### Native Windows
+
+Install Playwright's Windows Chromium build once:
+
+```powershell
+Push-Location frontend
+npx playwright install chromium
+Pop-Location
+```
+
+Run the checks and production builds:
+
+```powershell
+Push-Location backend
+go test ./...
+go vet ./...
+New-Item -ItemType Directory -Path bin -Force | Out-Null
+go build -o bin\fakemex.exe .\cmd\fakemex
+Pop-Location
+Push-Location frontend
+npm test
+npm run test:e2e
+npm run build
+Pop-Location
+```
+
+### Linux or WSL
 
 On Ubuntu or WSL, the first end-to-end test run also needs Playwright's Chromium
 browser and its Linux system dependencies:
